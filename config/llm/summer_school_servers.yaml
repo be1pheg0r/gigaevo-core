@@ -1,0 +1,58 @@
+# @package _global_
+
+# "Летняя школа" GPU servers (see AIRI Notion: "LLM-серверы — подключение").
+# Two bare-metal boxes (4x Tesla V100-32GB each), models served via
+# llama.cpp with an OpenAI-compatible API, no tunnel needed.
+#
+# Router covers the two general-purpose models, weighted roughly by their
+# measured aggregate throughput (728 tok/s for 9B across 4 instances vs
+# 359 tok/s for 35B-A3B across 2 instances) rather than equal probability.
+# The third deployed model (Qwen3.6-27B-Fable-Fusion, safety-alignment
+# removed) is intentionally NOT included here — it's the slowest (26 tok/s,
+# dense, single instance) and exists for a different purpose (accepts
+# requests the other two refuse). Select it explicitly via
+# `llm=summer_school_27b` instead of blending it into ordinary mutation
+# traffic.
+#
+# Requires env vars (server API keys differ per host):
+#   SUMMER_SCHOOL_LLM_KEY_A=<key for 82.202.157.243>
+#   SUMMER_SCHOOL_LLM_KEY_B=<key for 82.202.156.206>
+#
+# Usage:
+#   python run.py ... llm=summer_school_servers
+
+llm:
+  _target_: gigaevo.llm.models.MultiModelRouter
+  _convert_: all
+  models:
+    # Qwen3.5-9B — Q8_0, 65536 ctx, 4 instances (1 GPU each).
+    - _target_: langchain_openai.ChatOpenAI
+      model: qwen3.5-9b
+      api_key: ${oc.env:SUMMER_SCHOOL_LLM_KEY_A}
+      base_url: http://82.202.157.243:8080/v1
+      temperature: 1.0
+      max_tokens: 8192
+      request_timeout: ${request_timeout}
+      extra_body:
+        top_p: 0.95
+        top_k: 20
+        chat_template_kwargs:
+          enable_thinking: false
+
+    # Qwen3.6-35B-A3B — MoE (256 experts, 8+1 active, ~3B active params),
+    # Q8_0, 65536 ctx, 2 instances (2 GPUs each).
+    - _target_: langchain_openai.ChatOpenAI
+      model: qwen3.6-35b-a3b
+      api_key: ${oc.env:SUMMER_SCHOOL_LLM_KEY_B}
+      base_url: http://82.202.156.206:8080/v1
+      temperature: 1.0
+      max_tokens: 8192
+      request_timeout: ${request_timeout}
+      extra_body:
+        top_p: 0.95
+        top_k: 20
+        chat_template_kwargs:
+          enable_thinking: false
+
+  probabilities: [0.67, 0.33]
+  writer: ${writer}
