@@ -3,21 +3,32 @@
 from dataclasses import dataclass
 import os
 import re
+import time
 from typing import Any
 
 import httpx
 from openai import AsyncOpenAI
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import AsyncRetrying, stop_after_attempt, wait_exponential
+
+from gigaevo.monitoring.subprocess_emit import emit_llm_call_from_subprocess
+
+# Stage label under which chain-eval calls show up in [LLM_CALL] lines —
+# distinguishes them from the mutator's LangGraphAgent-emitted calls.
+_STAGE_LABEL = "ChainValidatorLLM"
 
 
 @dataclass
 class CallLog:
-    """Log entry for a single LLM call."""
+    """Log entry for a single LLM call (one attempt, success or failure)."""
 
     prompt_tokens: int
     completion_tokens: int
     cost: float
     cost_utilization: float
+    duration_ms: float = 0.0
+    model: str = ""
+    ok: bool = True
+    error_type: str | None = None
 
 
 def get_async_client(
@@ -68,6 +79,7 @@ class LLMClient:
         self.model = model
         self.max_cost = max_cost
         self._call_logs: list[CallLog] = []
+        self._endpoint = (client_kwargs or {}).get("base_url", "")
         self.client = get_async_client(**(client_kwargs or {}))
 
         self.model_pricing = model_pricing or self._get_default_pricing(model)
@@ -103,10 +115,62 @@ class LLMClient:
         utilization = total_cost / self.max_cost if self.max_cost > 0 else 0.0
         return total_cost, utilization
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=0.1, min=0.1, max=2),
-    )
+    async def _call_once(
+        self, messages: list[dict[str, str]], kwargs: dict[str, Any], attempt: int
+    ) -> str:
+        """Perform a single request attempt, logging cost/time/outcome either way.
+
+        Runs inside `CallValidatorFunction`'s isolated subprocess, so in
+        addition to the in-process `_call_logs` accumulator (read via
+        `call_logs`/`copy()` within this process) it also emits a
+        cross-process `[LLM_CALL]` line via `emit_llm_call_from_subprocess` —
+        the only channel that survives the subprocess boundary.
+        """
+        t0 = time.monotonic()
+        ok = False
+        error_type: str | None = None
+        prompt_tokens = completion_tokens = 0
+        try:
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                **kwargs,
+            )
+            usage = response.usage
+            prompt_tokens = usage.prompt_tokens if usage else 0
+            completion_tokens = usage.completion_tokens if usage else 0
+            ok = True
+            return remove_thinking(response.choices[0].message.content or "")
+        except Exception as exc:
+            error_type = type(exc).__name__
+            raise
+        finally:
+            latency_ms = (time.monotonic() - t0) * 1000.0
+            cost, utilization = self._compute_cost(prompt_tokens, completion_tokens)
+            self._call_logs.append(
+                CallLog(
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    cost=cost,
+                    cost_utilization=utilization,
+                    duration_ms=latency_ms,
+                    model=self.model,
+                    ok=ok,
+                    error_type=error_type,
+                )
+            )
+            emit_llm_call_from_subprocess(
+                stage=_STAGE_LABEL,
+                model=self.model,
+                endpoint=self._endpoint,
+                attempt=attempt,
+                ok=ok,
+                latency_ms=latency_ms,
+                tokens_in=prompt_tokens,
+                tokens_out=completion_tokens,
+                error_type=error_type,
+            )
+
     async def __call__(
         self,
         prompt: str,
@@ -120,31 +184,20 @@ class LLMClient:
             messages.append({"role": "system", "content": system_message})
         messages.append({"role": "user", "content": prompt})
 
-        response = await self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            **kwargs,
-        )
-
-        usage = response.usage
-        prompt_tokens = usage.prompt_tokens if usage else 0
-        completion_tokens = usage.completion_tokens if usage else 0
-
-        cost, utilization = self._compute_cost(prompt_tokens, completion_tokens)
-
-        self._call_logs.append(
-            CallLog(
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                cost=cost,
-                cost_utilization=utilization,
-            )
-        )
-
-        content = response.choices[0].message.content or ""
-        content = remove_thinking(content)
-
-        return content
+        result: str | None = None
+        # Same stop/wait policy as the previous @retry decorator (still
+        # raises tenacity.RetryError on exhaustion, unchanged from before) —
+        # rewritten as an explicit loop so each attempt can be logged.
+        async for attempt in AsyncRetrying(
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=0.1, min=0.1, max=2),
+        ):
+            with attempt:
+                result = await self._call_once(
+                    messages, kwargs, attempt.retry_state.attempt_number
+                )
+        assert result is not None
+        return result
 
     async def close(self) -> None:
         await self.client.close()
@@ -161,5 +214,6 @@ class LLMClient:
         client.model_pricing = self.model_pricing
         client.generation_kwargs = self.generation_kwargs
         client.client = self.client
+        client._endpoint = self._endpoint
         client._call_logs = []
         return client

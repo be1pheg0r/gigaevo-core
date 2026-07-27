@@ -23,6 +23,7 @@ from gigaevo.programs.stages.python_executors.wrapper import (
 )
 from gigaevo.programs.stages.stage_registry import StageRegistry
 from gigaevo.programs.utils import dedent_code
+from gigaevo.utils.logger_setup import get_log_file_path
 
 T = TypeVar("T")
 
@@ -99,6 +100,11 @@ class PythonCodeExecutor(Stage, Generic[T]):
                 env_updates={
                     "GIGAEVO_PROGRAM_ID": program.id,
                     "GIGAEVO_PROGRAM_ID_SHORT": program.id[:8],
+                    # Lets LLM clients running inside this subprocess (e.g. the
+                    # chain-eval validator's LLMClient) append LLM_CALL events
+                    # to the same run log — see monitoring/subprocess_emit.py.
+                    # Their calls previously never reached any log at all.
+                    "GIGAEVO_LOG_FILE": get_log_file_path() or "",
                 },
                 timeout=int(self.timeout),
                 max_memory_mb=self.max_memory_mb,

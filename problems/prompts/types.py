@@ -14,6 +14,10 @@ class CallLog:
     completion_tokens: int
     cost: float  # Actual cost in dollars
     cost_utilization: float  # Fraction of max_cost budget
+    duration_ms: float = 0.0
+    model: str = ""
+    ok: bool = True
+    error_type: str | None = None
 
     @property
     def total_tokens(self) -> int:

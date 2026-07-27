@@ -4,6 +4,19 @@ import sys
 
 from loguru import logger
 
+# Set by setup_logger() at run startup; read by get_log_file_path() so
+# CallValidatorFunction can thread the path into its subprocess env
+# (GIGAEVO_LOG_FILE) — see gigaevo.monitoring.subprocess_emit.
+_current_log_file: str | None = None
+
+
+def get_log_file_path() -> str | None:
+    """Path of the log file set up by the most recent setup_logger() call.
+
+    None if setup_logger() hasn't run yet (e.g. in unit tests).
+    """
+    return _current_log_file
+
 
 def setup_logger(
     log_dir: str = "logs",
@@ -89,6 +102,9 @@ def setup_logger(
     from gigaevo.monitoring.exception_sink import install_exception_sink
 
     install_exception_sink()
+
+    global _current_log_file
+    _current_log_file = log_file
 
     logger.info(f"Logging to console and file: {log_file}")
     return log_file

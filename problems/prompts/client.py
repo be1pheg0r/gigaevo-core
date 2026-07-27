@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import os
+import time
 from typing import Any
 
 import httpx
 from openai import AsyncOpenAI
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import AsyncRetrying, stop_after_attempt, wait_exponential
 
+from gigaevo.monitoring.subprocess_emit import emit_llm_call_from_subprocess
 from problems.prompts.types import CallLog
+
+# Stage label under which these calls show up in [LLM_CALL] lines —
+# distinguishes prompt-coevolution validator calls from the mutator's.
+_STAGE_LABEL = "PromptValidatorLLM"
 
 
 def get_async_client(
@@ -71,6 +77,7 @@ class LLMClient:
         self.model = model
         self.max_cost = max_cost
         self._call_logs: list[CallLog] = []
+        self._endpoint = (client_kwargs or {}).get("base_url", "")
         self.client = get_async_client(**(client_kwargs or {}))
 
         # Model pricing (per 1M tokens) - user-provided or default
@@ -123,10 +130,67 @@ class LLMClient:
 
         return total_cost, utilization
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=10),
-    )
+    async def _call_once(self, prompt: str, kwargs: dict[str, Any], attempt: int) -> str:
+        """Perform a single request attempt, logging cost/time/outcome either way.
+
+        Runs inside `CallValidatorFunction`'s isolated subprocess, so beyond
+        the in-process `_call_logs` accumulator it also emits a cross-process
+        `[LLM_CALL]` line via `emit_llm_call_from_subprocess` — the only
+        channel that survives the subprocess boundary (see
+        `gigaevo.monitoring.subprocess_emit`).
+
+        Raises:
+            ValueError: If cost budget is exceeded after this call.
+        """
+        t0 = time.monotonic()
+        ok = False
+        error_type: str | None = None
+        prompt_tokens = completion_tokens = 0
+        try:
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                **kwargs,
+            )
+            usage = response.usage
+            prompt_tokens = usage.prompt_tokens if usage else 0
+            completion_tokens = usage.completion_tokens if usage else 0
+            ok = True
+            return response.choices[0].message.content or ""
+        except Exception as exc:
+            error_type = type(exc).__name__
+            raise
+        finally:
+            latency_ms = (time.monotonic() - t0) * 1000.0
+            cost, utilization = self._compute_cost(prompt_tokens, completion_tokens)
+            self._call_logs.append(
+                CallLog(
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    cost=cost,
+                    cost_utilization=utilization,
+                    duration_ms=latency_ms,
+                    model=self.model,
+                    ok=ok,
+                    error_type=error_type,
+                )
+            )
+            emit_llm_call_from_subprocess(
+                stage=_STAGE_LABEL,
+                model=self.model,
+                endpoint=self._endpoint,
+                attempt=attempt,
+                ok=ok,
+                latency_ms=latency_ms,
+                tokens_in=prompt_tokens,
+                tokens_out=completion_tokens,
+                error_type=error_type,
+            )
+            if ok:
+                total_util = sum(log.cost_utilization for log in self._call_logs)
+                if total_util > 1.0:
+                    raise ValueError(f"Cost budget exceeded: {total_util:.2%}")
+
     async def __call__(self, prompt: str) -> str:
         """Make LLM call with cost tracking.
 
@@ -141,36 +205,20 @@ class LLMClient:
         """
         kwargs = self.generation_kwargs
 
-        response = await self.client.chat.completions.create(
-            model=self.model,
-            messages=[{"role": "user", "content": prompt}],
-            **kwargs,
-        )
-
-        # Extract token usage
-        usage = response.usage
-        prompt_tokens = usage.prompt_tokens if usage else 0
-        completion_tokens = usage.completion_tokens if usage else 0
-
-        # Compute and log cost
-        cost, utilization = self._compute_cost(prompt_tokens, completion_tokens)
-
-        self._call_logs.append(
-            CallLog(
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                cost=cost,
-                cost_utilization=utilization,
-            )
-        )
-
-        # Check if we exceeded budget after this call
-        total_util = sum(log.cost_utilization for log in self._call_logs)
-        if total_util > 1.0:
-            raise ValueError(f"Cost budget exceeded: {total_util:.2%}")
-
-        # Return raw response content
-        return response.choices[0].message.content or ""
+        result: str | None = None
+        # Same stop/wait policy as the previous @retry decorator (still
+        # raises tenacity.RetryError on exhaustion, unchanged from before) —
+        # rewritten as an explicit loop so each attempt can be logged.
+        async for attempt in AsyncRetrying(
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=1, min=1, max=10),
+        ):
+            with attempt:
+                result = await self._call_once(
+                    prompt, kwargs, attempt.retry_state.attempt_number
+                )
+        assert result is not None
+        return result
 
     async def close(self) -> None:
         """Close the underlying client."""
@@ -188,6 +236,7 @@ class LLMClient:
         client.model_pricing = self.model_pricing
         client.generation_kwargs = self.generation_kwargs
         client.client = self.client  # Share client (stateless)
+        client._endpoint = self._endpoint
         client._call_logs = []  # Fresh logs
 
         return client
