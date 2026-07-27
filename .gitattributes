@@ -1,0 +1,4 @@
+# Shell scripts must keep LF endings -- they run inside WSL/Linux, and a
+# CRLF-converted shebang line (#!/usr/bin/env bash\r) fails to exec directly,
+# with heredocs breaking too since the closing delimiter won't match.
+tools/pipeline_15tasks/*.sh text eol=lf
