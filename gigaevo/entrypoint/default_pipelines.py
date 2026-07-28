@@ -20,6 +20,7 @@ from gigaevo.programs.metrics.formatter import MetricsFormatter
 from gigaevo.programs.stages.ancestry_selector import AncestrySelector
 from gigaevo.programs.stages.archive_gate import ArchivePotentialGateStage
 from gigaevo.programs.stages.base import Stage
+from gigaevo.programs.stages.cost_assessment import CostAssessmentStage
 from gigaevo.programs.stages.collector import (
     AncestorProgramIds,
     DescendantProgramIds,
