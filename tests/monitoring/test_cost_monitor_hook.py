@@ -14,10 +14,10 @@ def _cleanup():
     reset_subscribers()
 
 
-def _call(stage: str, tokens: int, latency_ms: float) -> None:
+def _call(stage: str, tokens: int, latency_ms: float, tokens_out: int = 0) -> None:
     emit(LLMCall(
         stage=stage, endpoint="", model="x", ok=True,
-        latency_ms=latency_ms, tokens_in=tokens, tokens_out=0,
+        latency_ms=latency_ms, tokens_in=tokens, tokens_out=tokens_out,
     ))
 
 
@@ -61,3 +61,14 @@ class TestMutantBucketing:
         await _fire(hook)  # mutant 1: one point
         await _fire(hook)  # mutant 2: no LLM calls at all
         assert hook._tokens_by_stage["A"] == [100.0]
+
+    @pytest.mark.asyncio
+    async def test_tokens_out_bucketed_separately_for_duration_model(self) -> None:
+        pred = CostPrediction(max_mutants=10, max_in_flight=1)
+        hook = CostMonitorHook(agent=None, prediction=pred, interval=1000)
+
+        _call("A", 100, 1000.0, tokens_out=40)
+        _call("A", 50, 500.0, tokens_out=10)
+        await _fire(hook)
+        assert hook._tokens_out_by_stage["A"] == [50.0]
+        assert pred.predicted_duration_s > 0

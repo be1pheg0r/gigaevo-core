@@ -6,9 +6,12 @@ from gigaevo.monitoring.growth_estimator import (
     EnsembleLaw,
     LinearLaw,
     PowerLaw,
+    RobustPowerLaw,
     confidence_width,
     estimate,
     estimate_by_stage,
+    estimate_duration_by_stage,
+    fit_ttft_tpot,
 )
 
 
@@ -95,7 +98,7 @@ def test_ensemble_weights_toward_whichever_shape_fits_better() -> None:
     ens_linear = EnsembleLaw.fit(linear_values)
     assert ens_linear.w_linear > ens_linear.w_power
 
-    power_values = [3 * (i + 1) ** 2.5 for i in range(10)]
+    power_values = [3 * (i + 1) ** 1.7 for i in range(10)]
     ens_power = EnsembleLaw.fit(power_values)
     assert ens_power.w_power > ens_power.w_linear
 
@@ -104,3 +107,47 @@ def test_estimate_accepts_alternate_law_cls() -> None:
     tokens = [3 * (i + 1) ** 1.5 for i in range(5)]
     est = estimate(tokens, [0.0] * 5, total_calls=20, max_in_flight=1, law_cls=PowerLaw)
     assert est.predicted_total_tokens > 0
+
+
+def test_robust_power_law_ignores_a_single_outlier_point() -> None:
+    # One anomalously tiny first value (e.g. a near-empty cold-start call)
+    # should not dominate the fit the way it would under OLS.
+    values = [1.0, 500.0, 520.0, 540.0, 560.0]
+    robust = RobustPowerLaw.fit(values)
+    ols = PowerLaw.fit(values)
+    # Both clamp b<=2, but the robust fit's extrapolation stays far more
+    # conservative than the OLS fit dragged around by the outlier.
+    assert robust.integral(50) < ols.integral(50)
+
+
+def test_bounded_integral_caps_runaway_extrapolation() -> None:
+    # A single tiny first point can send OLS log-log slope near the clamp
+    # ceiling; integrating that far past the observed range must not blow
+    # up to orders of magnitude beyond anything plausible.
+    values = [1.0, 500.0, 520.0, 540.0, 560.0]
+    est = estimate(values, [0.0] * 5, total_calls=200, max_in_flight=1, law_cls=PowerLaw)
+    # Flat (no-growth) extrapolation would be ~mean(values)*200 ≈ 84,400.
+    assert est.predicted_total_tokens < 84_400 * 10
+
+
+def test_fit_ttft_tpot_recovers_exact_linear_relationship() -> None:
+    tokens_out = [100.0, 200.0, 300.0, 400.0]
+    latency_ms = [1000.0 + 20.0 * t for t in tokens_out]  # ttft=1000, tpot=20
+    ttft, tpot = fit_ttft_tpot(tokens_out, latency_ms)
+    assert ttft == pytest.approx(1000.0)
+    assert tpot == pytest.approx(20.0)
+
+
+def test_estimate_duration_by_stage_uses_tokens_out_not_call_index() -> None:
+    # Latency is flat regardless of call index (no growth trend), but
+    # scales with tokens_out — the TTFT/TPOT model should recover that
+    # even though a growth-law-over-index fit would see nothing.
+    tokens_out_by_stage = {"A": [100.0, 200.0, 100.0, 200.0]}
+    latency_by_stage = {"A": [1100.0, 2100.0, 1100.0, 2100.0]}  # ttft=100, tpot=10
+    duration_s, ci = estimate_duration_by_stage(
+        tokens_out_by_stage, latency_by_stage,
+        total_units_by_stage={"A": 4}, max_in_flight=1,
+    )
+    # mean tokens_out=150 -> per-call latency ~= 100+10*150=1600ms; *4 calls = 6.4s
+    assert duration_s == pytest.approx(6.4, rel=0.05)
+    assert ci[0] <= duration_s <= ci[1]

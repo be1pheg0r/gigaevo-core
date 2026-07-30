@@ -17,7 +17,11 @@ from gigaevo.llm.agents.cost_monitor import (
 from gigaevo.monitoring.cost_predictor import CostPrediction
 from gigaevo.monitoring.emit import emit, subscribe
 from gigaevo.monitoring.events import CostAgentAdjustment, LLMCall
-from gigaevo.monitoring.growth_estimator import PowerLaw, estimate_by_stage
+from gigaevo.monitoring.growth_estimator import (
+    RobustPowerLaw,
+    estimate_by_stage,
+    estimate_duration_by_stage,
+)
 
 
 class CostMonitorHook:
@@ -40,6 +44,7 @@ class CostMonitorHook:
         # per mutant.
         self._history_flush_idx = 0
         self._tokens_by_stage: dict[str, list[float]] = {}
+        self._tokens_out_by_stage: dict[str, list[float]] = {}
         self._latency_by_stage: dict[str, list[float]] = {}
         subscribe(LLMCall.event, self._on_llm_call)
 
@@ -60,12 +65,15 @@ class CostMonitorHook:
             return
 
         stage_tokens: dict[str, float] = {}
+        stage_tokens_out: dict[str, float] = {}
         stage_latency: dict[str, float] = {}
         for rec in new_calls:
             stage_tokens[rec.stage] = stage_tokens.get(rec.stage, 0.0) + rec.tokens_in + rec.tokens_out
+            stage_tokens_out[rec.stage] = stage_tokens_out.get(rec.stage, 0.0) + rec.tokens_out
             stage_latency[rec.stage] = stage_latency.get(rec.stage, 0.0) + rec.latency_ms
         for stage, tokens in stage_tokens.items():
             self._tokens_by_stage.setdefault(stage, []).append(tokens)
+            self._tokens_out_by_stage.setdefault(stage, []).append(stage_tokens_out[stage])
             self._latency_by_stage.setdefault(stage, []).append(stage_latency[stage])
 
         # Extrapolate each stage's total firing count from its observed
@@ -79,14 +87,22 @@ class CostMonitorHook:
             self._tokens_by_stage, self._latency_by_stage,
             total_units_by_stage=total_units_by_stage,
             max_in_flight=self._pred.max_in_flight,
-            law_cls=PowerLaw,
+            law_cls=RobustPowerLaw,
+        )
+        # Duration uses the TTFT+TPOT physical model (latency ~ tokens_out),
+        # not a growth law over call index — latency doesn't follow a growth
+        # trend in this system (see estimate_duration_by_stage docstring).
+        duration_s, duration_ci = estimate_duration_by_stage(
+            self._tokens_out_by_stage, self._latency_by_stage,
+            total_units_by_stage=total_units_by_stage,
+            max_in_flight=self._pred.max_in_flight,
         )
         self._pred.predicted_total_tokens = int(est.predicted_total_tokens)
-        self._pred.predicted_duration_s = est.predicted_duration_s
+        self._pred.predicted_duration_s = duration_s
         self._pred.token_ci_low, self._pred.token_ci_high = (
             int(est.tokens_ci[0]), int(est.tokens_ci[1])
         )
-        self._pred.ci_low_s, self._pred.ci_high_s = est.duration_ci
+        self._pred.ci_low_s, self._pred.ci_high_s = duration_ci
         logger.info("[CostMonitorHook] mutant={} {}", self._counter, self._pred._log_estimate())
 
     async def __call__(self) -> None:

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+import statistics as st
 
 
 @dataclass
@@ -72,6 +73,12 @@ class PowerLaw:
         cov = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys))
         var = sum((x - mean_x) ** 2 for x in xs)
         b = cov / var if var > 0 else 0.0
+        # Clamp the exponent: genetic-programming bloat literature finds
+        # program-size growth is sub-quadratic even in the worst case, and
+        # a single noisy early point (e.g. a near-empty first call) can
+        # otherwise send b > 2 and blow up ``integral()`` by orders of
+        # magnitude when extrapolated far past the observed points.
+        b = max(-1.0, min(b, 2.0))
         log_a = mean_y - b * mean_x
         return cls(a=math.exp(log_a), b=b, n_points=n)
 
@@ -85,6 +92,78 @@ class PowerLaw:
         if abs(self.b + 1) < 1e-9:
             return max(0.0, self.a * math.log(n + 1))
         return max(0.0, self.a / (self.b + 1) * ((n + 1) ** (self.b + 1) - 1))
+
+
+@dataclass
+class RobustPowerLaw:
+    """y(x) = a * x^b, x = index + 1, fit via Theil-Sen (median of all
+    pairwise slopes) in log-log space instead of ordinary least squares.
+
+    OLS in log-log space is skewed by a single noisy point (e.g. a
+    near-empty first call, common in this system's cold-start calls);
+    Theil-Sen has a ~29% breakdown point and stays reliable through that.
+    Validated on real logs as the best of several token-count estimators
+    (tools/pipeline_15tasks/estimation_research).
+    """
+
+    a: float
+    b: float
+    n_points: int
+
+    @classmethod
+    def fit(cls, values: list[float]) -> RobustPowerLaw:
+        n = len(values)
+        if n == 0:
+            return cls(a=0.0, b=0.0, n_points=0)
+        pos = [max(v, 1e-6) for v in values]
+        if n == 1:
+            return cls(a=pos[0], b=0.0, n_points=1)
+        xs = [math.log(i + 1) for i in range(n)]
+        ys = [math.log(v) for v in pos]
+        slopes = [
+            (ys[j] - ys[i]) / (xs[j] - xs[i])
+            for i in range(n) for j in range(i + 1, n)
+            if xs[j] != xs[i]
+        ]
+        b = st.median(slopes) if slopes else 0.0
+        b = max(-1.0, min(b, 2.0))  # see PowerLaw.fit
+        log_a = st.median(y - b * x for x, y in zip(xs, ys))
+        return cls(a=math.exp(log_a), b=b, n_points=n)
+
+    def value_at(self, i: float) -> float:
+        return self.a * (i + 1) ** self.b
+
+    def integral(self, n: float) -> float:
+        if n <= 0:
+            return 0.0
+        if abs(self.b + 1) < 1e-9:
+            return max(0.0, self.a * math.log(n + 1))
+        return max(0.0, self.a / (self.b + 1) * ((n + 1) ** (self.b + 1) - 1))
+
+
+def fit_ttft_tpot(tokens_out: list[float], latency_ms: list[float]) -> tuple[float, float]:
+    """Fit latency_ms = ttft + tpot * tokens_out (OLS).
+
+    The physical model behind LLM decode latency: a roughly-constant
+    time-to-first-token plus a per-output-token decode cost. Validated as
+    a far better duration predictor than fitting latency as a growth law
+    over call index — latency correlates weakly with call order (r≈0.23
+    on real logs) but moderately with tokens_out (r≈0.57), and any
+    index-based curve fit is dominated by backpressure noise instead of a
+    real trend (tools/pipeline_15tasks/estimation_research).
+    """
+    n = len(tokens_out)
+    if n == 0:
+        return 0.0, 0.0
+    if n < 2:
+        return latency_ms[0], 0.0
+    mean_x = sum(tokens_out) / n
+    mean_y = sum(latency_ms) / n
+    cov = sum((x - mean_x) * (y - mean_y) for x, y in zip(tokens_out, latency_ms))
+    var = sum((x - mean_x) ** 2 for x in tokens_out)
+    tpot = cov / var if var > 0 else 0.0
+    ttft = mean_y - tpot * mean_x
+    return ttft, tpot
 
 
 def _residual_ss(law, values: list[float]) -> float:
@@ -124,6 +203,24 @@ class EnsembleLaw:
         return self.w_linear * self.linear.integral(n) + self.w_power * self.power.integral(n)
 
 
+def _bounded_integral(law, values: list[float], n: float) -> float:
+    """``law.integral(n)``, backstopped against runaway extrapolation.
+
+    A single noisy point (e.g. a near-empty first call) can still distort
+    the fitted intercept/scale enough to blow up the integral by orders of
+    magnitude even with a clamped exponent (PowerLaw.fit clamps the slope,
+    not the scale). Cap at a generous multiple of the flat (no-growth)
+    extrapolation — high enough that real growth trends pass through
+    untouched, low enough to catch orders-of-magnitude blowups.
+    """
+    raw = law.integral(n)
+    if not values:
+        return raw
+    flat = (sum(values) / len(values)) * n
+    cap = max(flat * 8.0, max(values) * 2.0)
+    return min(raw, cap) if cap > 0 else raw
+
+
 def confidence_width(n_points: int) -> float:
     """Relative half-width of the prediction interval. Shrinks as evidence
     accumulates; wide by default so a 1-2 point fit doesn't claim precision
@@ -159,8 +256,8 @@ def estimate(
     token_law = law_cls.fit(tokens_per_call)
     latency_law = law_cls.fit(latency_ms_per_call)
 
-    total_tokens = token_law.integral(total_calls)
-    total_latency_s = latency_law.integral(total_calls) / 1000.0
+    total_tokens = _bounded_integral(token_law, tokens_per_call, total_calls)
+    total_latency_s = _bounded_integral(latency_law, latency_ms_per_call, total_calls) / 1000.0
     duration_s = total_latency_s / max(max_in_flight, 1)
 
     w_tok = confidence_width(token_law.n_points)
@@ -207,8 +304,8 @@ def estimate_by_stage(
 
         tok_law = law_cls.fit(tokens)
         lat_law = law_cls.fit(latency)
-        tok_total = tok_law.integral(n)
-        lat_total_s = lat_law.integral(n) / 1000.0
+        tok_total = _bounded_integral(tok_law, tokens, n)
+        lat_total_s = _bounded_integral(lat_law, latency, n) / 1000.0
         w_tok = confidence_width(tok_law.n_points)
         w_lat = confidence_width(lat_law.n_points)
 
@@ -228,3 +325,39 @@ def estimate_by_stage(
         duration_ci=(lat_ci_lo_s / max(max_in_flight, 1), lat_ci_hi_s / max(max_in_flight, 1)),
         n_points=n_points,
     )
+
+
+def estimate_duration_by_stage(
+    tokens_out_by_stage: dict[str, list[float]],
+    latency_by_stage: dict[str, list[float]],
+    *,
+    total_units_by_stage: dict[str, int],
+    max_in_flight: int,
+    token_law_cls: type = RobustPowerLaw,
+) -> tuple[float, tuple[float, float]]:
+    """Predict total wall-clock duration via the TTFT+TPOT physical model
+    (:func:`fit_ttft_tpot`) per stage instead of fitting latency itself as
+    a growth law over call index — latency doesn't follow a growth trend
+    in this system (dominated by backpressure noise, r≈0.23 with call
+    index vs r≈0.57 with tokens_out); see :func:`fit_ttft_tpot`.
+
+    Returns ``(duration_s, (ci_low_s, ci_high_s))``.
+    """
+    total_latency_ms = 0.0
+    n_points = 0
+
+    for stage, tokens_out in tokens_out_by_stage.items():
+        latency = latency_by_stage.get(stage, [])
+        n = total_units_by_stage.get(stage, len(tokens_out))
+
+        ttft, tpot = fit_ttft_tpot(tokens_out, latency)
+        tok_law = token_law_cls.fit(tokens_out)
+        tok_out_total = _bounded_integral(tok_law, tokens_out, n)
+        mean_tok_out = tok_out_total / max(n, 1)
+
+        total_latency_ms += (ttft + tpot * mean_tok_out) * n
+        n_points += len(tokens_out)
+
+    duration_s = max(0.0, total_latency_ms / 1000.0 / max(max_in_flight, 1))
+    w = confidence_width(n_points)
+    return duration_s, (duration_s * (1 - w), duration_s * (1 + w))
