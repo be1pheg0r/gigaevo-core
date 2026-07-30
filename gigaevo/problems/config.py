@@ -125,6 +125,25 @@ class UtilsConfig(BaseModel):
         description="Utils imports for initial_programs/*.py",
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def _empty_functions_means_no_import(cls, data: object) -> object:
+        """Treat ``{"functions": []}`` as "no import" (None).
+
+        LLM generation reliably means "nothing to import here" but writes
+        an empty list instead of omitting the field / using null --
+        UtilsImportSpec itself correctly rejects an empty list (it's a
+        meaningless import spec on its own), so normalize here, before
+        pydantic tries to build the nested UtilsImportSpec and rejects it.
+        """
+        if not isinstance(data, dict):
+            return data
+        for key in ("validator", "helper", "context", "initial_programs"):
+            value = data.get(key)
+            if isinstance(value, dict) and not value.get("functions"):
+                data[key] = None
+        return data
+
 
 class TaskDescription(BaseModel):
     """Task description with optional hints and metadata."""
