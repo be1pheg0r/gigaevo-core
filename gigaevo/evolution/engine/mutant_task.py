@@ -40,6 +40,8 @@ from loguru import logger
 
 from gigaevo.evolution.engine.mutation import generate_one_mutation
 from gigaevo.evolution.engine.refresh import ParentRefreshTicket
+from gigaevo.monitoring.emit import emit
+from gigaevo.monitoring.events import MutationAttempted
 
 
 async def run_one_mutant(engine, task_id: int) -> str | None:
@@ -128,6 +130,7 @@ async def run_one_mutant(engine, task_id: int) -> str | None:
         # so the `finally` block does not double-release the same locks.
         ticket = None
         engine.metrics.mutations_created += 1
+        emit(MutationAttempted(mutant_id=new_id))
         # Persist both counters: total_mutants drives the stopper across
         # resume; next_iteration is the next ordinal to hand out so the
         # x-axis stays unique even after a crash.

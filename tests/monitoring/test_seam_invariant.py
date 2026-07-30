@@ -28,6 +28,7 @@ ALLOWED_SEAMS: dict[str, tuple[str, ...]] = {
     "programs/stages/base.py": ("STAGE_EXEC",),
     "llm/agents/base.py": ("LLM_CALL",),
     "evolution/engine/backpressure_sampler.py": ("BACKPRESSURE_SAMPLE",),
+    "evolution/engine/mutant_task.py": ("MUTATION_ATTEMPTED",),
     # Adversarial helpers + their one caller each
     "adversarial/structured_logging.py": (
         "TRACKER_WRITE",

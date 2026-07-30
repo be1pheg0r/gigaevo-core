@@ -11,11 +11,11 @@ import asyncio
 from datetime import UTC, datetime
 import json
 from pathlib import Path
-import resource
 import signal
 import time
 
 from loguru import logger
+import psutil
 import redis as redis_lib
 
 from gigaevo.experiment.manifest import set_status
@@ -358,9 +358,14 @@ class WatchdogEngine:
                     _log.warning(f"Cannot remove plot {f}: {exc}")
 
     def _log_memory(self) -> float:
-        """Log current memory RSS in MB. Returns RSS in MB."""
-        usage = resource.getrusage(resource.RUSAGE_SELF)
-        rss_mb = usage.ru_maxrss / 1024  # Linux: KB -> MB
+        """Log current memory RSS in MB. Returns RSS in MB.
+
+        Uses psutil (cross-platform) rather than the POSIX-only `resource`
+        module, so this works on Windows too -- `gigaevo/monitoring/__init__.py`
+        imports this module unconditionally, so a POSIX-only import here broke
+        `import gigaevo` entirely on Windows, not just the watchdog CLI.
+        """
+        rss_mb = psutil.Process().memory_info().rss / (1024 * 1024)
         _log.info(f"Memory RSS: {rss_mb:.1f} MB")
         return rss_mb
 

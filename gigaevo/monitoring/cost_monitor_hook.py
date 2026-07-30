@@ -15,7 +15,7 @@ from gigaevo.llm.agents.cost_monitor import (
 )
 from gigaevo.monitoring.cost_predictor import CostPrediction
 from gigaevo.monitoring.emit import emit, subscribe
-from gigaevo.monitoring.events import CostAgentAdjustment, LLMCall
+from gigaevo.monitoring.events import CostAgentAdjustment, LLMCall, MutationAttempted
 from gigaevo.monitoring.growth_estimator import (
     RobustPowerLaw,
     estimate_by_stage,
@@ -45,11 +45,21 @@ class CostMonitorHook:
         self._tokens_by_stage: dict[str, list[float]] = {}
         self._tokens_out_by_stage: dict[str, list[float]] = {}
         self._latency_by_stage: dict[str, list[float]] = {}
+        # Mutation attempts observed so far (MUTATION_ATTEMPTED fires per DAG
+        # dispatch, before accept/reject — see mutant_task.py). ``max_mutants``
+        # caps ATTEMPTS, not accepted mutants, so the accept rate
+        # (self._counter / self._attempts) is needed to project how many
+        # more accepted mutants (i.e. hook flushes) will actually happen.
+        self._attempts = 0
         subscribe(LLMCall.event, self._on_llm_call)
+        subscribe(MutationAttempted.event, self._on_mutation_attempted)
 
     def _on_llm_call(self, event: LLMCall) -> None:
         """Live subscriber — feeds every real LLM call into the history."""
         self.add_llm_call(event.tokens_in, event.tokens_out, event.latency_ms, event.stage)
+
+    def _on_mutation_attempted(self, event: MutationAttempted) -> None:
+        self._attempts += 1
 
     def _flush_mutant_bucket(self) -> None:
         """Sum calls since the last flush per stage, refit the growth law,
@@ -75,11 +85,22 @@ class CostMonitorHook:
             self._tokens_out_by_stage.setdefault(stage, []).append(stage_tokens_out[stage])
             self._latency_by_stage.setdefault(stage, []).append(stage_latency[stage])
 
+        # ``max_mutants`` is a cap on ATTEMPTS (MaxMutantsStopper watches
+        # engine.metrics.mutations_created), not on accepted mutants — with
+        # a 7-25% accept rate, treating max_mutants as the expected accepted
+        # count overshoots the token/duration prediction by ~1/accept_rate.
+        # Project the actual expected accepted-mutant count from the
+        # observed accept rate so far; fall back to accept_rate=1 (old
+        # behavior) when no attempts have been observed yet (e.g. in tests
+        # that emit LLM_CALL without MUTATION_ATTEMPTED).
+        accept_rate = self._counter / self._attempts if self._attempts > 0 else 1.0
+        expected_total_accepted = self._pred.max_mutants * accept_rate
+
         # Extrapolate each stage's total firing count from its observed
         # rate-per-mutant so far (some stages skip-cascade and don't fire
         # on every mutant — see lineage_memory_pipeline.py archive gating).
         total_units_by_stage = {
-            stage: max(1, round(self._pred.max_mutants * len(series) / max(self._counter, 1)))
+            stage: max(1, round(expected_total_accepted * len(series) / max(self._counter, 1)))
             for stage, series in self._tokens_by_stage.items()
         }
         est = estimate_by_stage(

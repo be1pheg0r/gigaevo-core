@@ -131,6 +131,23 @@ class LLMCall(BaseEvent):
     error_type: str | None = None
 
 
+class MutationAttempted(BaseEvent):
+    """A mutant candidate was dispatched into the DAG for evaluation.
+
+    Fires once per attempt (``engine.metrics.mutations_created``), before
+    the accept/reject decision — distinct from a mutant actually landing.
+    Lets live consumers (e.g. CostMonitorHook) compute an observed accept
+    rate instead of conflating "attempts" with "accepted mutants" (the
+    stopper counts the former; the latter is what actually accrues cost).
+    """
+
+    event: ClassVar[str] = "MUTATION_ATTEMPTED"
+    description: ClassVar[str] = "A mutant candidate was dispatched into the DAG (attempt)."
+    health_question: ClassVar[str] = "What is the observed accept rate vs attempts?"
+
+    mutant_id: str
+
+
 class CostAgentAdjustment(BaseEvent):
     event: ClassVar[str] = "COST_AGENT_ADJUSTMENT"
     description: ClassVar[str] = "CostMonitorAgent adjusted the live cost model."
