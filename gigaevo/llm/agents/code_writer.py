@@ -200,11 +200,16 @@ class CodeWriterAgent(LangGraphAgent):
 
             parseable = _best_parseable(code)
             if parseable is None:
-                last_problem = "Response was not valid Python (SyntaxError)."
+                try:
+                    ast.parse(code)
+                except SyntaxError as e:
+                    last_problem = f"Response was not valid Python: {e}"
+                else:
+                    last_problem = "Response was not valid Python (SyntaxError)."
                 retry_note = last_problem
                 logger.warning(
-                    "[CodeWriterAgent] attempt {}/{} for {} ({}): {}",
-                    attempt + 1, max_attempts, file_kind, problem_name, last_problem,
+                    "[CodeWriterAgent] attempt {}/{} for {} ({}): {}\n--- raw response ---\n{}",
+                    attempt + 1, max_attempts, file_kind, problem_name, last_problem, code,
                 )
                 continue
             if _looks_like_unimplemented_stub(parseable):

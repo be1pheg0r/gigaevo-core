@@ -56,10 +56,15 @@ _LLM_CALL_RE = re.compile(r"\[LLM_CALL\] (\{.*\})")
 
 
 def _make_llm() -> ChatOpenAI:
+    """Qwen3.6-35B-A3B (MoE, 3B active) -- more reliable structured-output
+    and instruction-following than the 9B for the guard/task-builder
+    classification steps (confirmed live: the 9B needed multiple config
+    auto-fixes/retries; the 35B is also the faster single-request model
+    per the AIRI server benchmarks)."""
     return ChatOpenAI(
-        model="qwen3.5-9b",
-        api_key=os.environ["SUMMER_SCHOOL_LLM_KEY_A"],
-        base_url="http://82.202.157.243:8080/v1",
+        model="qwen3.6-35b-a3b",
+        api_key=os.environ["SUMMER_SCHOOL_LLM_KEY_B"],
+        base_url="http://82.202.156.206:8080/v1",
         temperature=1.0,
         max_tokens=4096,
         request_timeout=120,
@@ -68,7 +73,7 @@ def _make_llm() -> ChatOpenAI:
 
 
 def _make_code_llm() -> ChatOpenAI:
-    """Separate, higher-max_tokens LLM for CodeWriterAgent.
+    """Same 35B model as _make_llm, with higher max_tokens for CodeWriterAgent.
 
     Confirmed live: a verbose validate.py response hit the shared
     max_tokens=4096 mid-generation (openai.LengthFinishReasonError) --
@@ -76,9 +81,9 @@ def _make_code_llm() -> ChatOpenAI:
     ProblemConfig/guard classification response.
     """
     return ChatOpenAI(
-        model="qwen3.5-9b",
-        api_key=os.environ["SUMMER_SCHOOL_LLM_KEY_A"],
-        base_url="http://82.202.157.243:8080/v1",
+        model="qwen3.6-35b-a3b",
+        api_key=os.environ["SUMMER_SCHOOL_LLM_KEY_B"],
+        base_url="http://82.202.156.206:8080/v1",
         temperature=1.0,
         max_tokens=8192,
         request_timeout=180,
