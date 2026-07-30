@@ -34,10 +34,10 @@ class CostMonitorHook:
         self._interval = interval
         self._counter = 0
         self._call_history: list[LlmCallRecord] = []
-        # Per-stage growth-law state (Видение 2026-07-30): calls are bucketed
-        # by accepted mutant — the hook itself fires once per accepted mutant
-        # (see ingestor.py), so "calls since the last flush" IS one mutant's
-        # calls, no program_id join needed. One point per stage per mutant.
+        # Per-stage growth-law state. The hook fires once per accepted
+        # mutant (see ingestor.py), so "calls since the last flush" IS one
+        # mutant's calls — no program_id join needed. One point per stage
+        # per mutant.
         self._history_flush_idx = 0
         self._tokens_by_stage: dict[str, list[float]] = {}
         self._latency_by_stage: dict[str, list[float]] = {}
@@ -51,9 +51,8 @@ class CostMonitorHook:
         """Sum calls since the last flush per stage, refit the growth law,
         and write the new estimate into the shared CostPrediction.
 
-        Runs on EVERY accepted mutant (not gated by ``interval``) — per
-        Видение п.3, the estimate should refine after every mutant; only
-        the LLM-agent calibration call is throttled to every N.
+        Runs on EVERY accepted mutant, not gated by ``interval`` — only the
+        LLM-agent calibration call below is throttled to every N mutants.
         """
         new_calls = self._call_history[self._history_flush_idx:]
         self._history_flush_idx = len(self._call_history)

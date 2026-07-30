@@ -1,15 +1,10 @@
 """Growth-law estimator for live cost prediction.
 
-Per the 2026-07-30 "Видение" design doc: fit a per-call growth law (minimum
-viable: linear) from calls observed so far, integrate it out to the total
-call count for cumulative tokens, and apply Little's Law (wall time =
-total service time / concurrency) for duration. Replaces the
-median/percentile heuristics in cost_predictor.py's v4 model with a
-principled fit + closed-form integral, refit after every call.
-
-Optimizing for error early in a run (first few calls), not convergence at
-the end — that's the metric the estimate is actually used for (deciding
-whether to launch), per the same design doc.
+Fits a per-call growth law (linear) from calls observed so far, integrates
+it out to the total call count for cumulative tokens, and applies Little's
+Law (wall time = total service time / concurrency) for duration. Refit
+after every call, so the estimate is usable from the first few calls of a
+run rather than only converging by the end.
 """
 
 from __future__ import annotations
@@ -43,8 +38,7 @@ class LinearLaw:
         return cls(intercept=intercept, slope=slope, n_points=n)
 
     def integral(self, n: float) -> float:
-        """Cumulative sum of the fitted line over calls 0..n (continuous
-        integral — the "law -> integral" step from the vision doc)."""
+        """Cumulative sum of the fitted line over calls 0..n."""
         return max(0.0, self.intercept * n + self.slope * n * n / 2.0)
 
 
@@ -109,10 +103,9 @@ def estimate_by_stage(
     law over the pooled, heterogeneous call stream.
 
     Different stages have structurally different token/latency profiles —
-    pooling them makes the index axis alternate between two distributions,
-    which is not a "growth trend" at all and produces garbage extrapolation
-    (validated on real logs: pooled fit was off by 100-700%). Fitting per
-    stage and summing keeps each law honest.
+    pooling them makes the index axis alternate between two distributions
+    instead of following a single growth trend, which breaks the linear
+    fit. Fitting per stage and summing keeps each law honest.
 
     Little's Law is applied ONCE, on the pooled total service time across
     all stages (not per stage then divided again) — the stages share the
