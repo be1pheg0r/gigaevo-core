@@ -11,7 +11,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-import statistics as st
+
+import numpy as np
+from scipy import stats as sp_stats
 
 
 @dataclass
@@ -30,13 +32,9 @@ class LinearLaw:
             return cls(intercept=0.0, slope=0.0, n_points=0)
         if n == 1:
             return cls(intercept=values[0], slope=0.0, n_points=1)
-        mean_i = (n - 1) / 2.0
-        mean_y = sum(values) / n
-        cov = sum((i - mean_i) * (y - mean_y) for i, y in enumerate(values))
-        var = sum((i - mean_i) ** 2 for i in range(n))
-        slope = cov / var if var > 0 else 0.0
-        intercept = mean_y - slope * mean_i
-        return cls(intercept=intercept, slope=slope, n_points=n)
+        idx = np.arange(n, dtype=float)
+        slope, intercept = np.polyfit(idx, np.asarray(values, dtype=float), 1)
+        return cls(intercept=float(intercept), slope=float(slope), n_points=n)
 
     def value_at(self, i: float) -> float:
         return self.intercept + self.slope * i
@@ -63,24 +61,20 @@ class PowerLaw:
         n = len(values)
         if n == 0:
             return cls(a=0.0, b=0.0, n_points=0)
-        pos = [max(v, 1e-6) for v in values]
+        pos = np.maximum(np.asarray(values, dtype=float), 1e-6)
         if n == 1:
-            return cls(a=pos[0], b=0.0, n_points=1)
-        xs = [math.log(i + 1) for i in range(n)]
-        ys = [math.log(v) for v in pos]
-        mean_x = sum(xs) / n
-        mean_y = sum(ys) / n
-        cov = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys))
-        var = sum((x - mean_x) ** 2 for x in xs)
-        b = cov / var if var > 0 else 0.0
+            return cls(a=float(pos[0]), b=0.0, n_points=1)
+        xs = np.log(np.arange(1, n + 1, dtype=float))
+        ys = np.log(pos)
+        b, _ = np.polyfit(xs, ys, 1)
         # Clamp the exponent: genetic-programming bloat literature finds
         # program-size growth is sub-quadratic even in the worst case, and
         # a single noisy early point (e.g. a near-empty first call) can
         # otherwise send b > 2 and blow up ``integral()`` by orders of
         # magnitude when extrapolated far past the observed points.
-        b = max(-1.0, min(b, 2.0))
-        log_a = mean_y - b * mean_x
-        return cls(a=math.exp(log_a), b=b, n_points=n)
+        b = float(np.clip(b, -1.0, 2.0))
+        log_a = ys.mean() - b * xs.mean()
+        return cls(a=float(np.exp(log_a)), b=b, n_points=n)
 
     def value_at(self, i: float) -> float:
         return self.a * (i + 1) ** self.b
@@ -115,19 +109,14 @@ class RobustPowerLaw:
         n = len(values)
         if n == 0:
             return cls(a=0.0, b=0.0, n_points=0)
-        pos = [max(v, 1e-6) for v in values]
+        pos = np.maximum(np.asarray(values, dtype=float), 1e-6)
         if n == 1:
-            return cls(a=pos[0], b=0.0, n_points=1)
-        xs = [math.log(i + 1) for i in range(n)]
-        ys = [math.log(v) for v in pos]
-        slopes = [
-            (ys[j] - ys[i]) / (xs[j] - xs[i])
-            for i in range(n) for j in range(i + 1, n)
-            if xs[j] != xs[i]
-        ]
-        b = st.median(slopes) if slopes else 0.0
-        b = max(-1.0, min(b, 2.0))  # see PowerLaw.fit
-        log_a = st.median(y - b * x for x, y in zip(xs, ys))
+            return cls(a=float(pos[0]), b=0.0, n_points=1)
+        xs = np.log(np.arange(1, n + 1, dtype=float))
+        ys = np.log(pos)
+        b, _, _, _ = sp_stats.theilslopes(ys, xs)
+        b = float(np.clip(b, -1.0, 2.0))  # see PowerLaw.fit
+        log_a = float(np.median(ys - b * xs))
         return cls(a=math.exp(log_a), b=b, n_points=n)
 
     def value_at(self, i: float) -> float:
@@ -157,17 +146,18 @@ def fit_ttft_tpot(tokens_out: list[float], latency_ms: list[float]) -> tuple[flo
         return 0.0, 0.0
     if n < 2:
         return latency_ms[0], 0.0
-    mean_x = sum(tokens_out) / n
-    mean_y = sum(latency_ms) / n
-    cov = sum((x - mean_x) * (y - mean_y) for x, y in zip(tokens_out, latency_ms))
-    var = sum((x - mean_x) ** 2 for x in tokens_out)
-    tpot = cov / var if var > 0 else 0.0
-    ttft = mean_y - tpot * mean_x
-    return ttft, tpot
+    xs = np.asarray(tokens_out, dtype=float)
+    ys = np.asarray(latency_ms, dtype=float)
+    if np.ptp(xs) == 0:
+        return float(ys.mean()), 0.0
+    tpot, ttft = np.polyfit(xs, ys, 1)
+    return float(ttft), float(tpot)
 
 
 def _residual_ss(law, values: list[float]) -> float:
-    return sum((law.value_at(i) - y) ** 2 for i, y in enumerate(values))
+    idx = np.arange(len(values), dtype=float)
+    fitted = np.array([law.value_at(i) for i in idx])
+    return float(np.sum((fitted - np.asarray(values, dtype=float)) ** 2))
 
 
 @dataclass
