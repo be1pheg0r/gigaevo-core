@@ -17,6 +17,7 @@ from gigaevo.llm.agents.cost_monitor import (
 from gigaevo.monitoring.cost_predictor import CostPrediction
 from gigaevo.monitoring.emit import emit, subscribe
 from gigaevo.monitoring.events import CostAgentAdjustment, LLMCall
+from gigaevo.monitoring.growth_estimator import estimate_by_stage
 
 
 class CostMonitorHook:
@@ -33,14 +34,64 @@ class CostMonitorHook:
         self._interval = interval
         self._counter = 0
         self._call_history: list[LlmCallRecord] = []
+        # Per-stage growth-law state (Видение 2026-07-30): calls are bucketed
+        # by accepted mutant — the hook itself fires once per accepted mutant
+        # (see ingestor.py), so "calls since the last flush" IS one mutant's
+        # calls, no program_id join needed. One point per stage per mutant.
+        self._history_flush_idx = 0
+        self._tokens_by_stage: dict[str, list[float]] = {}
+        self._latency_by_stage: dict[str, list[float]] = {}
         subscribe(LLMCall.event, self._on_llm_call)
 
     def _on_llm_call(self, event: LLMCall) -> None:
         """Live subscriber — feeds every real LLM call into the history."""
         self.add_llm_call(event.tokens_in, event.tokens_out, event.latency_ms, event.stage)
 
+    def _flush_mutant_bucket(self) -> None:
+        """Sum calls since the last flush per stage, refit the growth law,
+        and write the new estimate into the shared CostPrediction.
+
+        Runs on EVERY accepted mutant (not gated by ``interval``) — per
+        Видение п.3, the estimate should refine after every mutant; only
+        the LLM-agent calibration call is throttled to every N.
+        """
+        new_calls = self._call_history[self._history_flush_idx:]
+        self._history_flush_idx = len(self._call_history)
+        if not new_calls:
+            return
+
+        stage_tokens: dict[str, float] = {}
+        stage_latency: dict[str, float] = {}
+        for rec in new_calls:
+            stage_tokens[rec.stage] = stage_tokens.get(rec.stage, 0.0) + rec.tokens_in + rec.tokens_out
+            stage_latency[rec.stage] = stage_latency.get(rec.stage, 0.0) + rec.latency_ms
+        for stage, tokens in stage_tokens.items():
+            self._tokens_by_stage.setdefault(stage, []).append(tokens)
+            self._latency_by_stage.setdefault(stage, []).append(stage_latency[stage])
+
+        # Extrapolate each stage's total firing count from its observed
+        # rate-per-mutant so far (some stages skip-cascade and don't fire
+        # on every mutant — see lineage_memory_pipeline.py archive gating).
+        total_units_by_stage = {
+            stage: max(1, round(self._pred.max_mutants * len(series) / max(self._counter, 1)))
+            for stage, series in self._tokens_by_stage.items()
+        }
+        est = estimate_by_stage(
+            self._tokens_by_stage, self._latency_by_stage,
+            total_units_by_stage=total_units_by_stage,
+            max_in_flight=self._pred.max_in_flight,
+        )
+        self._pred.predicted_total_tokens = int(est.predicted_total_tokens)
+        self._pred.predicted_duration_s = est.predicted_duration_s
+        self._pred.token_ci_low, self._pred.token_ci_high = (
+            int(est.tokens_ci[0]), int(est.tokens_ci[1])
+        )
+        self._pred.ci_low_s, self._pred.ci_high_s = est.duration_ci
+        logger.info("[CostMonitorHook] mutant={} {}", self._counter, self._pred._log_estimate())
+
     async def __call__(self) -> None:
         self._counter += 1
+        self._flush_mutant_bucket()
         if self._counter % self._interval != 0:
             return
 

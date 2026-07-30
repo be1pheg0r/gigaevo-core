@@ -21,6 +21,8 @@
 
 cost_prediction:
   _target_: gigaevo.monitoring.cost_predictor.CostPrediction
+  max_mutants: ${max_mutants}
+  max_in_flight: ${max_in_flight}
 
 cost_monitor_agent:
   _target_: gigaevo.llm.agents.cost_monitor.CostMonitorAgent
