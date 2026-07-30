@@ -283,6 +283,29 @@ class ProblemConfig(BaseModel):
     )
 
     @model_validator(mode="after")
+    def _drop_bogus_initial_program_utils_imports(self) -> ProblemConfig:
+        """Strip seed-program names out of ``utils_imports.initial_programs``.
+
+        Confirmed live: the model sometimes lists the seed programs' own
+        names (e.g. ``naive_tim_sort``) as functions to import from the
+        shared utils module -- those names were never exported by utils.py,
+        they're just what it called its own initial_programs/*.py files.
+        Importing them raises ImportError, so every seed program fails
+        before ``entrypoint`` even runs. Auto-correct rather than reject +
+        retry: this is unambiguous and doesn't need another LLM round-trip.
+        """
+        spec = self.utils_imports.initial_programs if self.utils_imports else None
+        if spec is None or not self.initial_programs:
+            return self
+        program_names = {p.name for p in self.initial_programs}
+        kept = [f for f in spec.functions if f not in program_names and f != "*"]
+        if len(kept) != len(spec.functions):
+            self.utils_imports.initial_programs = (
+                UtilsImportSpec(functions=kept) if kept else None
+            )
+        return self
+
+    @model_validator(mode="after")
     def _run_validations(self) -> ProblemConfig:
         """Run all config validations."""
         errors = ProblemConfigValidator.validate_all(self)
