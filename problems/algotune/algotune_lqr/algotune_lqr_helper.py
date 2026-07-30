@@ -183,8 +183,11 @@ def compute_cost(problem: dict[str, Any], U: np.ndarray) -> float:
     for t in range(horizon):
         xt = X[t]
         ut = U[t].reshape(m, 1)
-        total_cost += float(xt.T @ Q @ xt + ut.T @ R @ ut)
-    total_cost += float(X[horizon].T @ P @ X[horizon])
+        # .item(), not float(): the (1, 1) matmul result has ndim=2, which
+        # numpy>=2.0 refuses to convert via float() even though it holds a
+        # single element.
+        total_cost += (xt.T @ Q @ xt + ut.T @ R @ ut).item()
+    total_cost += (X[horizon].T @ P @ X[horizon]).item()
     return total_cost
 
 
@@ -192,7 +195,7 @@ def optimal_cost(problem: dict[str, Any]) -> float:
     """Return the optimal LQR cost via backward Riccati recursion."""
     A, B, Q, R, P, horizon, x0 = _parse_problem(problem)
     S, _ = _backward_riccati_gains(A, B, Q, R, P, horizon)
-    return float(x0.T @ S[0] @ x0)
+    return (x0.T @ S[0] @ x0).item()
 
 
 def relative_cost_error(reference_cost: float, candidate_cost: float) -> float:
@@ -235,3 +238,15 @@ def is_solution(problem: dict[str, Any], solution: Any) -> bool:
     except Exception:
         return False
     return True
+
+
+if __name__ == "__main__":
+    # Smoke check for the numpy>=2.0 float()-on-(1,1)-array regression:
+    # the optimal reference solution must validate against itself with
+    # ~zero cost error, exercising compute_cost/optimal_cost end to end.
+    for spec in get_case_specs():
+        problem = generate_problem(**spec)
+        solution = solve_problem(problem)
+        diagnostics = validate_solution(problem, solution)
+        assert diagnostics["relative_cost_error"] < 1.0e-4, diagnostics
+    print(f"ok — {len(get_case_specs())} cases validated")
