@@ -37,19 +37,24 @@ class CostMonitorHook:
         self._interval = interval
         self._counter = 0
         self._call_history: list[LlmCallRecord] = []
-        # Per-stage growth-law state. The hook fires once per accepted
-        # mutant (see ingestor.py), so "calls since the last flush" IS one
-        # mutant's calls — no program_id join needed. One point per stage
-        # per mutant.
+        # Per-stage growth-law state. The hook flushes once per accepted
+        # mutant (post_step_hook, see ingestor.py) AND once per mutation
+        # attempt (MUTATION_ATTEMPTED, see mutant_task.py) — the latter
+        # guarantees at least one estimate appears even for low/zero-accept
+        # domains, where post_step_hook (gated on an ACCEPT landing) may
+        # never fire within a short/small run. ``_history_flush_idx``
+        # dedupes: whichever trigger fires first drains ``_call_history``,
+        # the other is then a no-op for that batch of calls.
         self._history_flush_idx = 0
         self._tokens_by_stage: dict[str, list[float]] = {}
         self._tokens_out_by_stage: dict[str, list[float]] = {}
         self._latency_by_stage: dict[str, list[float]] = {}
         # Mutation attempts observed so far (MUTATION_ATTEMPTED fires per DAG
-        # dispatch, before accept/reject — see mutant_task.py). ``max_mutants``
-        # caps ATTEMPTS, not accepted mutants, so the accept rate
-        # (self._counter / self._attempts) is needed to project how many
-        # more accepted mutants (i.e. hook flushes) will actually happen.
+        # dispatch, before accept/reject). ``max_mutants`` caps ATTEMPTS, not
+        # accepted mutants (MaxMutantsStopper watches
+        # engine.metrics.mutations_created) — since flushes now track
+        # attempts 1:1, this is the correct denominator for projecting each
+        # stage's total firing count, no accept-rate correction needed.
         self._attempts = 0
         subscribe(LLMCall.event, self._on_llm_call)
         subscribe(MutationAttempted.event, self._on_mutation_attempted)
@@ -60,13 +65,15 @@ class CostMonitorHook:
 
     def _on_mutation_attempted(self, event: MutationAttempted) -> None:
         self._attempts += 1
+        self._flush_mutant_bucket()
 
     def _flush_mutant_bucket(self) -> None:
         """Sum calls since the last flush per stage, refit the growth law,
         and write the new estimate into the shared CostPrediction.
 
-        Runs on EVERY accepted mutant, not gated by ``interval`` — only the
-        LLM-agent calibration call below is throttled to every N mutants.
+        Runs on every accepted mutant AND every mutation attempt, not
+        gated by ``interval`` — only the LLM-agent calibration call in
+        ``__call__`` is throttled to every N accepted mutants.
         """
         new_calls = self._call_history[self._history_flush_idx:]
         self._history_flush_idx = len(self._call_history)
@@ -85,22 +92,17 @@ class CostMonitorHook:
             self._tokens_out_by_stage.setdefault(stage, []).append(stage_tokens_out[stage])
             self._latency_by_stage.setdefault(stage, []).append(stage_latency[stage])
 
-        # ``max_mutants`` is a cap on ATTEMPTS (MaxMutantsStopper watches
-        # engine.metrics.mutations_created), not on accepted mutants — with
-        # a 7-25% accept rate, treating max_mutants as the expected accepted
-        # count overshoots the token/duration prediction by ~1/accept_rate.
-        # Project the actual expected accepted-mutant count from the
-        # observed accept rate so far; fall back to accept_rate=1 (old
-        # behavior) when no attempts have been observed yet (e.g. in tests
-        # that emit LLM_CALL without MUTATION_ATTEMPTED).
-        accept_rate = self._counter / self._attempts if self._attempts > 0 else 1.0
-        expected_total_accepted = self._pred.max_mutants * accept_rate
-
         # Extrapolate each stage's total firing count from its observed
-        # rate-per-mutant so far (some stages skip-cascade and don't fire
-        # on every mutant — see lineage_memory_pipeline.py archive gating).
+        # rate-per-attempt so far (some stages skip-cascade and don't fire
+        # on every attempt — see lineage_memory_pipeline.py archive gating).
+        # ``self._attempts`` is the flush-cadence denominator (buckets track
+        # attempts via ``_on_mutation_attempted`` above), so this projects
+        # directly against ``max_mutants`` (attempts cap) with no
+        # accept-rate correction needed. Falls back to a denominator of 1
+        # when no attempts have been observed yet (e.g. tests that emit
+        # LLM_CALL without MUTATION_ATTEMPTED).
         total_units_by_stage = {
-            stage: max(1, round(expected_total_accepted * len(series) / max(self._counter, 1)))
+            stage: max(1, round(self._pred.max_mutants * len(series) / max(self._attempts, 1)))
             for stage, series in self._tokens_by_stage.items()
         }
         est = estimate_by_stage(
