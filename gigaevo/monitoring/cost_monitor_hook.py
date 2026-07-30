@@ -4,8 +4,7 @@ Designed as a post-step hook for the evolution engine.
 """
 from __future__ import annotations
 
-import asyncio
-from typing import Any
+import json
 
 from loguru import logger
 
@@ -104,6 +103,21 @@ class CostMonitorHook:
         )
         self._pred.ci_low_s, self._pred.ci_high_s = duration_ci
         logger.info("[CostMonitorHook] mutant={} {}", self._counter, self._pred._log_estimate())
+        # Compact single-line JSON alongside the human-readable block above —
+        # consumers (e.g. tools/task_builder_web) parse this instead of the
+        # multi-line text, which is fragile to regex across interleaved logs.
+        logger.info(
+            "[CostMonitorHookJSON] {}",
+            json.dumps({
+                "mutant": self._counter,
+                "predicted_tokens": self._pred.predicted_total_tokens,
+                "token_ci_low": self._pred.token_ci_low,
+                "token_ci_high": self._pred.token_ci_high,
+                "predicted_duration_s": self._pred.predicted_duration_s,
+                "ci_low_s": self._pred.ci_low_s,
+                "ci_high_s": self._pred.ci_high_s,
+            }),
+        )
 
     async def __call__(self) -> None:
         self._counter += 1
