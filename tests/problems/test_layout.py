@@ -52,6 +52,8 @@ def _make_config(
             decimals=3,
             is_primary=True,
             higher_is_better=True,
+            lower_bound=0.0,
+            upper_bound=1.0,
         ),
     }
     if extra_metrics:

@@ -191,6 +191,13 @@ class ProblemConfigValidator:
         primary_count = sum(1 for s in config.metrics.values() if s.is_primary)
         if primary_count != 1:
             errors.append(f"Exactly one metric must be primary, found {primary_count}")
+        for name, spec in config.metrics.items():
+            if spec.is_primary and (spec.lower_bound is None or spec.upper_bound is None):
+                errors.append(
+                    f"Primary metric '{name}' must define both lower_bound and "
+                    "upper_bound (required by ProblemContext._load_metrics_context "
+                    "at run.py time -- catch it here instead)."
+                )
         return errors
 
     @staticmethod
