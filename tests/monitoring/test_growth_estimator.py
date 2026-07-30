@@ -3,7 +3,9 @@ from __future__ import annotations
 import pytest
 
 from gigaevo.monitoring.growth_estimator import (
+    EnsembleLaw,
     LinearLaw,
+    PowerLaw,
     confidence_width,
     estimate,
     estimate_by_stage,
@@ -72,3 +74,33 @@ def test_estimate_by_stage_beats_pooled_estimate_on_alternating_stages() -> None
     )
     # true total if extrapolated correctly: 100*10 + 300*10 = 4000
     assert est.predicted_total_tokens == pytest.approx(4000.0)
+
+
+def test_power_law_recovers_exact_curve_without_noise() -> None:
+    # y = 3 * (i+1)^2  ->  a=3, b=2
+    values = [3 * (i + 1) ** 2 for i in range(10)]
+    law = PowerLaw.fit(values)
+    assert law.a == pytest.approx(3.0, rel=1e-6)
+    assert law.b == pytest.approx(2.0, rel=1e-6)
+
+
+def test_power_law_integral_matches_closed_form() -> None:
+    law = PowerLaw(a=2.0, b=1.0, n_points=5)  # y = 2x, integral = x^2
+    # integral from x=1 to x=n+1 of 2x dx = (n+1)^2 - 1
+    assert law.integral(3) == pytest.approx(4.0**2 - 1.0)
+
+
+def test_ensemble_weights_toward_whichever_shape_fits_better() -> None:
+    linear_values = [10 + 2 * i for i in range(10)]
+    ens_linear = EnsembleLaw.fit(linear_values)
+    assert ens_linear.w_linear > ens_linear.w_power
+
+    power_values = [3 * (i + 1) ** 2.5 for i in range(10)]
+    ens_power = EnsembleLaw.fit(power_values)
+    assert ens_power.w_power > ens_power.w_linear
+
+
+def test_estimate_accepts_alternate_law_cls() -> None:
+    tokens = [3 * (i + 1) ** 1.5 for i in range(5)]
+    est = estimate(tokens, [0.0] * 5, total_calls=20, max_in_flight=1, law_cls=PowerLaw)
+    assert est.predicted_total_tokens > 0

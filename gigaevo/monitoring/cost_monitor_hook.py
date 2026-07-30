@@ -17,7 +17,7 @@ from gigaevo.llm.agents.cost_monitor import (
 from gigaevo.monitoring.cost_predictor import CostPrediction
 from gigaevo.monitoring.emit import emit, subscribe
 from gigaevo.monitoring.events import CostAgentAdjustment, LLMCall
-from gigaevo.monitoring.growth_estimator import estimate_by_stage
+from gigaevo.monitoring.growth_estimator import PowerLaw, estimate_by_stage
 
 
 class CostMonitorHook:
@@ -79,6 +79,7 @@ class CostMonitorHook:
             self._tokens_by_stage, self._latency_by_stage,
             total_units_by_stage=total_units_by_stage,
             max_in_flight=self._pred.max_in_flight,
+            law_cls=PowerLaw,
         )
         self._pred.predicted_total_tokens = int(est.predicted_total_tokens)
         self._pred.predicted_duration_s = est.predicted_duration_s
