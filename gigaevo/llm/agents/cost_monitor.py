@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, ClassVar
+from typing import Any, ClassVar, TypedDict
 
 from langchain_core.messages import BaseMessage, SystemMessage, HumanMessage
 from pydantic import BaseModel, Field
@@ -209,8 +209,16 @@ skip_next_calibration()
 
 # ── Agent ───────────────────────────────────────────────────────────────────
 
+class CostMonitorState(TypedDict, total=False):
+    messages: list[BaseMessage]
+    llm_response: Any
+    metadata: dict[str, Any]
+
+
 class CostMonitorAgent(LangGraphAgent):
     """LLM agent that analyses cost telemetry and adjusts the cost model."""
+
+    StateSchema = CostMonitorState
 
     def __init__(
         self,
@@ -228,6 +236,15 @@ class CostMonitorAgent(LangGraphAgent):
     @tools.setter
     def tools(self, ts: _ToolSet) -> None:
         self._tools = ts
+
+    async def arun(self, state: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Run the full build_prompt -> call_llm -> parse_response graph.
+
+        CostMonitorHook drives the steps manually instead (it needs to set
+        ``self.tools`` between calls), but LangGraphAgent.arun is abstract —
+        without a concrete override the class can't be instantiated at all.
+        """
+        return await self.graph.ainvoke(state or {"messages": []})
 
     def build_prompt(self, state: dict[str, Any]) -> list[BaseMessage]:
         tools = self._tools
