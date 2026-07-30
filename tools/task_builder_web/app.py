@@ -36,6 +36,7 @@ sys.path.insert(0, str(REPO))
 load_dotenv(REPO / ".env")
 
 from gigaevo.llm.agents.factories import (  # noqa: E402
+    create_code_writer_agent,
     create_task_builder_agent,
     create_task_guard_agent,
 )
@@ -79,7 +80,7 @@ class MutantPoint:
     actual_tokens_so_far: int
 
 
-STAGES = ["guarding", "building", "scaffolding", "seeding", "estimating", "done"]
+STAGES = ["guarding", "building", "scaffolding", "writing_code", "seeding", "estimating", "done"]
 
 
 @dataclass
@@ -175,6 +176,50 @@ async def _tail_seed_run(job: Job, log_path: Path) -> None:
     job.stage = "done"
 
 
+async def _write_real_code(config, target_dir: Path, llm: ChatOpenAI) -> None:
+    """Replace every scaffolded stub (``# TODO`` + ``pass``) with a real
+    implementation.
+
+    ProblemLayout's jinja templates only emit a signature + docstring +
+    TODO body -- a freshly scaffolded problem is not runnable yet. Left
+    as-is, every seed program returns ``None``, CallProgramFunction/
+    CallValidatorFunction AUTO-SKIP, ``is_valid=0`` always, and the
+    archive never gets a single accepted mutant (confirmed live: a demo
+    job stalled with 0 accepted after its full attempt budget for exactly
+    this reason).
+    """
+    writer = create_code_writer_agent(llm)
+    task_description = config.task_description.objective
+
+    for prog in config.initial_programs:
+        path = target_dir / "initial_programs" / f"{prog.name}.py"
+        stub = path.read_text(encoding="utf-8")
+        code = await writer.arun(
+            problem_name=config.name,
+            task_description=task_description,
+            file_kind="initial_program",
+            file_purpose=f"Seed strategy '{prog.name}': {prog.description}",
+            stub_code=stub,
+        )
+        path.write_text(code, encoding="utf-8")
+
+    validate_path = target_dir / "validate.py"
+    stub = validate_path.read_text(encoding="utf-8")
+    metrics_desc = "\n".join(
+        f"- {name}: {spec.description} (primary={spec.is_primary}, "
+        f"higher_is_better={spec.higher_is_better})"
+        for name, spec in config.metrics.items()
+    )
+    code = await writer.arun(
+        problem_name=config.name,
+        task_description=task_description,
+        file_kind="validate",
+        file_purpose=f"Score a solution and report validity. Metrics:\n{metrics_desc}",
+        stub_code=stub,
+    )
+    validate_path.write_text(code, encoding="utf-8")
+
+
 async def _run_job(job: Job) -> None:
     llm = _make_llm()
     try:
@@ -207,6 +252,9 @@ async def _run_job(job: Job) -> None:
             "metrics": list(config.metrics.keys()),
             "initial_programs": [p.name for p in config.initial_programs],
         }
+
+        job.stage = "writing_code"
+        await _write_real_code(config, target_dir, llm)
 
         job.stage = "seeding"
         db = _next_redis_db()

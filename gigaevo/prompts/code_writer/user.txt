@@ -1,0 +1,11 @@
+Problem: {problem_name}
+Task description: {task_description}
+
+File to implement ({file_kind}): {file_purpose}
+
+Current stub:
+```python
+{stub_code}
+```
+
+Write the complete file with a real implementation.

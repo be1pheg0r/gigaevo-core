@@ -365,3 +365,29 @@ def create_task_builder_agent(
         system_prompt=system_prompt,
         user_prompt_template=user_template,
     )
+
+
+def create_code_writer_agent(
+    llm: ChatOpenAI | MultiModelRouter,
+    prompts_dir: str | Path | None = None,
+):
+    """Create the stub-file -> real-implementation agent.
+
+    Args:
+        llm: LangChain chat model or multi-model router
+        prompts_dir: Optional prompts directory override
+
+    Returns:
+        Ready-to-use CodeWriterAgent
+    """
+    from gigaevo.llm.agents.code_writer import CodeWriterAgent
+    from gigaevo.prompts import CodeWriterPrompts
+
+    system_prompt = CodeWriterPrompts.system(prompts_dir=prompts_dir)
+    user_template = CodeWriterPrompts.user(prompts_dir=prompts_dir)
+
+    return CodeWriterAgent(
+        llm=llm,
+        system_prompt=system_prompt,
+        user_prompt_template=user_template,
+    )

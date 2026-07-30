@@ -183,3 +183,15 @@ class TaskBuilderPrompts:
     def user(prompts_dir: str | Path | None = None) -> str:
         """User prompt template for ProblemConfig generation."""
         return load_prompt("task_builder", "user", prompts_dir=prompts_dir)
+
+
+class CodeWriterPrompts:
+    """Stub-to-implementation prompt templates (initial_programs/*.py, validate.py)."""
+
+    @staticmethod
+    def system(prompts_dir: str | Path | None = None) -> str:
+        return load_prompt("code_writer", "system", prompts_dir=prompts_dir)
+
+    @staticmethod
+    def user(prompts_dir: str | Path | None = None) -> str:
+        return load_prompt("code_writer", "user", prompts_dir=prompts_dir)
