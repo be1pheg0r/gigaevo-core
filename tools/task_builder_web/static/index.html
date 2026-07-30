@@ -197,7 +197,7 @@ function renderConfig(job) {
     <div>Seeds: ${c.initial_programs.join(", ")}</div>`;
   const dl = document.getElementById("downloadBtn");
   dl.classList.remove("disabled");
-  dl.href = `/api/jobs/${job.id}/download`;
+  dl.href = `api/jobs/${job.id}/download`;
   const ab = document.getElementById("abortBtn");
   if (job.stage === "seeding" || job.stage === "estimating") ab.classList.remove("disabled");
   else ab.classList.add("disabled");
@@ -244,7 +244,7 @@ function renderLog(job) {
 
 async function poll() {
   if (!currentJobId) return;
-  const res = await fetch(`/api/jobs/${currentJobId}`);
+  const res = await fetch(`api/jobs/${currentJobId}`);
   if (!res.ok) return;
   const job = await res.json();
   document.getElementById("workArea").classList.remove("d-none");
@@ -265,7 +265,7 @@ async function poll() {
 }
 
 async function loadHistory() {
-  const res = await fetch("/api/jobs");
+  const res = await fetch("api/jobs");
   const jobs = await res.json();
   const body = document.getElementById("historyBody");
   if (!jobs.length) { body.innerHTML = `<tr><td colspan="3" class="text-muted">No runs yet</td></tr>`; return; }
@@ -279,7 +279,7 @@ async function loadHistory() {
 document.getElementById("submitBtn").addEventListener("click", async () => {
   const text = document.getElementById("requestInput").value.trim();
   if (!text) return;
-  const res = await fetch("/api/jobs", {
+  const res = await fetch("api/jobs", {
     method: "POST", headers: {"Content-Type": "application/json"},
     body: JSON.stringify({request: text}),
   });
@@ -293,7 +293,7 @@ document.getElementById("submitBtn").addEventListener("click", async () => {
 
 document.getElementById("abortBtn").addEventListener("click", async () => {
   if (!currentJobId) return;
-  await fetch(`/api/jobs/${currentJobId}/abort`, {method: "POST"});
+  await fetch(`api/jobs/${currentJobId}/abort`, {method: "POST"});
 });
 
 loadHistory();
