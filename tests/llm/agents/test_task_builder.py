@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
+from pydantic import ValidationError
 import pytest
 
 from gigaevo.llm.agents.task_builder import TaskBuilderAgent
@@ -15,6 +16,14 @@ from gigaevo.problems.config import (
     TaskDescription,
 )
 from gigaevo.programs.metrics.context import MetricSpec
+
+
+def _real_validation_error() -> ValidationError:
+    try:
+        ProblemConfig(name="x")  # missing every other required field
+    except ValidationError as exc:
+        return exc
+    raise AssertionError("expected ValidationError")
 
 
 def _mock_llm():
@@ -112,3 +121,47 @@ class TestParseResponse:
         }
         with pytest.raises(ValueError, match="Expected ProblemConfig"):
             agent.parse_response(state)
+
+
+class TestArunRetry:
+    @pytest.mark.asyncio
+    async def test_retries_once_after_validation_error_and_succeeds(self):
+        llm = _mock_llm()
+        good_cfg = _valid_config()
+        llm.ainvoke = AsyncMock(side_effect=[_real_validation_error(), good_cfg])
+        agent = TaskBuilderAgent(
+            llm=llm, system_prompt="sys", user_prompt_template="{domain_hint}{request}"
+        )
+
+        result = await agent.arun("request", "hint")
+
+        assert result is good_cfg
+        assert llm.ainvoke.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_second_attempt_prompt_includes_error_feedback(self):
+        llm = _mock_llm()
+        good_cfg = _valid_config()
+        llm.ainvoke = AsyncMock(side_effect=[_real_validation_error(), good_cfg])
+        agent = TaskBuilderAgent(
+            llm=llm, system_prompt="sys", user_prompt_template="{domain_hint}{request}"
+        )
+
+        await agent.arun("request", "hint")
+
+        second_call_messages = llm.ainvoke.await_args_list[1].args[0]
+        user_text = second_call_messages[1].content
+        assert "rejected by validation" in user_text
+
+    @pytest.mark.asyncio
+    async def test_exhausts_attempts_and_raises_last_error(self):
+        llm = _mock_llm()
+        err1, err2 = _real_validation_error(), _real_validation_error()
+        llm.ainvoke = AsyncMock(side_effect=[err1, err2])
+        agent = TaskBuilderAgent(
+            llm=llm, system_prompt="sys", user_prompt_template="{domain_hint}{request}"
+        )
+
+        with pytest.raises(ValidationError):
+            await agent.arun("request", "hint", max_attempts=2)
+        assert llm.ainvoke.await_count == 2
