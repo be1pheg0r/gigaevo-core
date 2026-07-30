@@ -1,0 +1,8 @@
+Domain: {domain_hint}
+
+Approved user request:
+"""
+{request}
+"""
+
+Produce a complete ProblemConfig for this request.

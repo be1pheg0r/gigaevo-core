@@ -309,3 +309,59 @@ def create_memory_selector_agent(
     from gigaevo.llm.agents.memory_selector import MemorySelectorAgent
 
     return MemorySelectorAgent()
+
+
+def create_task_guard_agent(
+    llm: ChatOpenAI | MultiModelRouter,
+    categories_path: str | Path,
+    prompts_dir: str | Path | None = None,
+):
+    """Create the request -> allowed/forbidden gatekeeper agent.
+
+    Args:
+        llm: LangChain chat model or multi-model router
+        categories_path: path to config/task_builder/categories.yaml
+        prompts_dir: Optional prompts directory override
+
+    Returns:
+        Ready-to-use TaskGuardAgent
+    """
+    from gigaevo.llm.agents.task_guard import TaskGuardAgent, load_forbidden_categories
+    from gigaevo.prompts import TaskGuardPrompts
+
+    system_prompt = TaskGuardPrompts.system(prompts_dir=prompts_dir)
+    user_template = TaskGuardPrompts.user(prompts_dir=prompts_dir)
+    forbidden_categories = load_forbidden_categories(categories_path)
+
+    return TaskGuardAgent(
+        llm=llm,
+        system_prompt=system_prompt,
+        user_prompt_template=user_template,
+        forbidden_categories=forbidden_categories,
+    )
+
+
+def create_task_builder_agent(
+    llm: ChatOpenAI | MultiModelRouter,
+    prompts_dir: str | Path | None = None,
+):
+    """Create the request -> ProblemConfig generation agent.
+
+    Args:
+        llm: LangChain chat model or multi-model router
+        prompts_dir: Optional prompts directory override
+
+    Returns:
+        Ready-to-use TaskBuilderAgent
+    """
+    from gigaevo.llm.agents.task_builder import TaskBuilderAgent
+    from gigaevo.prompts import TaskBuilderPrompts
+
+    system_prompt = TaskBuilderPrompts.system(prompts_dir=prompts_dir)
+    user_template = TaskBuilderPrompts.user(prompts_dir=prompts_dir)
+
+    return TaskBuilderAgent(
+        llm=llm,
+        system_prompt=system_prompt,
+        user_prompt_template=user_template,
+    )

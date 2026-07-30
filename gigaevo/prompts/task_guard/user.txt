@@ -1,0 +1,9 @@
+Forbidden categories (hard blocks):
+{categories}
+
+User request:
+"""
+{request}
+"""
+
+Decide: is this a task request, does it match any forbidden category above, and (if accepted) what's a short domain label for it?

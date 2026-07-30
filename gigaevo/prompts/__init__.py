@@ -155,3 +155,31 @@ class MemorySelectorPrompts:
     def user(prompts_dir: str | Path | None = None) -> str:
         """User prompt template for memory selector."""
         return load_prompt("memory_selector", "user", prompts_dir=prompts_dir)
+
+
+class TaskGuardPrompts:
+    """Task-request gatekeeper prompt templates."""
+
+    @staticmethod
+    def system(prompts_dir: str | Path | None = None) -> str:
+        """System prompt for task-request classification."""
+        return load_prompt("task_guard", "system", prompts_dir=prompts_dir)
+
+    @staticmethod
+    def user(prompts_dir: str | Path | None = None) -> str:
+        """User prompt template for task-request classification."""
+        return load_prompt("task_guard", "user", prompts_dir=prompts_dir)
+
+
+class TaskBuilderPrompts:
+    """Task-config generator prompt templates."""
+
+    @staticmethod
+    def system(prompts_dir: str | Path | None = None) -> str:
+        """System prompt for ProblemConfig generation."""
+        return load_prompt("task_builder", "system", prompts_dir=prompts_dir)
+
+    @staticmethod
+    def user(prompts_dir: str | Path | None = None) -> str:
+        """User prompt template for ProblemConfig generation."""
+        return load_prompt("task_builder", "user", prompts_dir=prompts_dir)

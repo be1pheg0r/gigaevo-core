@@ -1,0 +1,72 @@
+# Guard rail for the natural-language -> gigaevo-problem builder agent
+# (gigaevo/llm/agents/task_guard.py, task_builder.py).
+#
+# Deny-list, not allow-list: any request describing a legitimate, scorable
+# optimization/search task is accepted UNLESS it matches one of these
+# forbidden categories. Modeled on Anthropic's Usage Policy prohibited-use
+# categories (malicious cyber activity, weapons/CBRN, CSAM, disinformation/
+# influence operations, surveillance/censorship tooling) —
+# https://www.anthropic.com/legal/aup — narrowed to what's actually
+# expressible as an "evolve a program that scores well against X" task.
+#
+# `keywords` back a deterministic regex pre-check in TaskGuardAgent that
+# runs independently of the LLM's own judgment (see
+# _keyword_backstop_hit) — the LLM classification is not the only line of
+# defense.
+
+forbidden_categories:
+  - id: malicious_cyber_activity
+    description: >
+      Malware, exploits, unauthorized intrusion tools, credential theft,
+      or evolving code against a target the requester does not have
+      authorization to test.
+    keywords:
+      - malware
+      - ransomware
+      - exploit
+      - rootkit
+      - keylogger
+      - botnet
+      - "0day"
+      - "zero-day"
+      - ddos
+      - "unauthorized access"
+      - backdoor
+  - id: weapons_and_cbrn
+    description: >
+      Design, optimization, or effectiveness-scoring of weapons, explosives,
+      or chemical/biological/radiological/nuclear materials or delivery
+      systems.
+    keywords:
+      - explosive
+      - warhead
+      - bioweapon
+      - chemical weapon
+      - nerve agent
+      - pathogen synthesis
+      - enrichment cascade
+      - "nuclear weapon"
+  - id: csam
+    description: Any content involving sexualization of minors, in any form.
+    keywords: []
+  - id: disinformation_and_manipulation
+    description: >
+      Optimizing content or campaigns to deceive at scale — fake engagement,
+      coordinated inauthentic behavior, astroturfing, election
+      disinformation, impersonation of real people.
+    keywords:
+      - astroturf
+      - fake engagement
+      - bot farm
+      - disinformation campaign
+      - deepfake of a real person
+  - id: surveillance_and_censorship
+    description: >
+      Building or optimizing tools for mass surveillance, tracking
+      individuals without consent, or automated censorship/content
+      suppression at the request of a state or organization.
+    keywords:
+      - mass surveillance
+      - covert tracking
+      - censorship system
+      - social credit scoring
