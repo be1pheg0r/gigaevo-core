@@ -18,6 +18,7 @@ from gigaevo.monitoring.emit import (
 from gigaevo.monitoring.eta_ticker import start_eta_ticker
 from gigaevo.monitoring.live_frontier_compare import start_live_frontier_compare
 from gigaevo.monitoring.live_profiler import start_live_profiler
+from gigaevo.monitoring.stall_watchdog import start_stall_watchdog
 from gigaevo.problems.initial_loaders import InitialProgramLoader
 from gigaevo.programs.stages.python_executors.wrapper import default_exec_runner_pool
 from gigaevo.runner.dag_runner import DagRunner
@@ -86,6 +87,12 @@ async def run_experiment(cfg: DictConfig) -> None:
             evolution_engine,
             interval_s=float(cfg.live_profiler.interval_s),
         )
+        if cfg.stall_watchdog.enabled:
+            start_stall_watchdog(
+                evolution_engine,
+                stall_timeout_s=float(cfg.stall_watchdog.stall_timeout_s),
+                check_interval_s=float(cfg.stall_watchdog.check_interval_s),
+            )
 
         await serve_until_signal(
             stop_coros=(evolution_engine.stop(), dag_runner.stop()),

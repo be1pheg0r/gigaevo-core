@@ -34,3 +34,11 @@ live_frontier_compare:
   # loguru at INFO; "telegram" calls tools.telegram_notify.notify; "file"
   # re-renders frontier_<metric>.png in the Hydra run output dir each tick.
   emit_targets: ["log", "file"]
+
+# Stops the run early if zero mutants are accepted for stall_timeout_s
+# (e.g. every seed program fails validation and the elite archive never
+# gets a first entry — see gigaevo/monitoring/stall_watchdog.py).
+stall_watchdog:
+  enabled: true
+  stall_timeout_s: 300.0
+  check_interval_s: 15.0
