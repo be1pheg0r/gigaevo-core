@@ -61,6 +61,34 @@ class MaxMutantsStopper(EvolutionStopper):
         return (remaining / tp.mutants_per_second, "MaxMutantsStopper")
 
 
+class MaxAcceptedStopper(EvolutionStopper):
+    """Stop once ``max_accepted`` mutants have landed in the archive.
+
+    Unlike ``MaxMutantsStopper`` (caps mutation ATTEMPTS —
+    ``ctx.total_mutants``, incremented per DAG dispatch regardless of
+    accept/reject), this caps ACCEPTED mutants (``ctx.programs_processed``,
+    incremented only when a mutant is added to the archive). Useful when
+    the run needs a guaranteed amount of accepted data (e.g. to seed the
+    growth-law estimator) rather than a fixed compute budget.
+    """
+
+    def __init__(self, max_accepted: int) -> None:
+        self.max_accepted = max_accepted
+
+    def should_stop(self, ctx: StopContext) -> StopDecision:
+        if ctx.programs_processed >= self.max_accepted:
+            return StopDecision(
+                stop=True,
+                reason=f"Reached max_accepted={self.max_accepted}",
+            )
+        return StopDecision(stop=False, reason="")
+
+    def estimate_remaining(
+        self, ctx: StopContext, tp: EngineThroughput
+    ) -> tuple[float, str] | None:
+        return None
+
+
 class WallClockStopper(EvolutionStopper):
     def __init__(self, budget_seconds: float) -> None:
         self.budget_seconds = budget_seconds

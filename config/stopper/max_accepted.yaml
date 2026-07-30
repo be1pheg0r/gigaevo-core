@@ -1,0 +1,2 @@
+_target_: gigaevo.evolution.engine.stopper.MaxAcceptedStopper
+max_accepted: ${max_accepted}

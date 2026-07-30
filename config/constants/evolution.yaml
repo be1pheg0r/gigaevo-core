@@ -7,6 +7,7 @@ sync_min_delta: 8
 num_parents: 1
 mutation_mode: rewrite
 max_mutants: 250
+max_accepted: 250  # only consulted when stopper=max_accepted
 strip_comments_and_docstrings: false
 pre_step_hook: null
 post_step_hook: null
