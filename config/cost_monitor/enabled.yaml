@@ -1,0 +1,33 @@
+# @package _global_
+#
+# Live cost-monitor agent — CostMonitorAgent runs every `interval` accepted
+# mutants (post_step_hook fires once per ingestor sweep that landed a
+# program) and adjusts the live cost model's cold_start / golden_ratio /
+# growth_rate. LLM telemetry is fed live via the in-process LLM_CALL
+# subscriber in gigaevo/monitoring/emit.py — no log tailing.
+#
+# Adjustments are logged as COST_AGENT_ADJUSTMENT canonical events
+# (mutant_index, cold/golden/growth, reasoning) for offline analysis, e.g.
+# tools/pipeline_15tasks/analyze_logs.py.
+#
+# Not part of the `pipeline` group on purpose: it's orthogonal to
+# pipeline_builder choice. Enable additively on top of any experiment:
+#
+#   python run.py problem.name=heilbron +cost_monitor=enabled
+#
+# Composes AFTER the defaults list, so it wins the post_step_hook slot even
+# when combined with pipeline=intra_extra_memory (LiveMemoryRefreshHook) —
+# the two hooks are not currently combinable (single post_step_hook slot).
+
+cost_prediction:
+  _target_: gigaevo.monitoring.cost_predictor.CostPrediction
+
+cost_monitor_agent:
+  _target_: gigaevo.llm.agents.cost_monitor.CostMonitorAgent
+  llm: ${ref:llm}
+
+post_step_hook:
+  _target_: gigaevo.monitoring.cost_monitor_hook.CostMonitorHook
+  agent: ${cost_monitor_agent}
+  prediction: ${cost_prediction}
+  interval: 5

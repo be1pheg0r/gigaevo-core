@@ -18,7 +18,7 @@ from typing import ClassVar
 from loguru import logger
 import pytest
 
-from gigaevo.monitoring.emit import emit
+from gigaevo.monitoring.emit import emit, reset_subscribers, subscribe
 from gigaevo.monitoring.events import BaseEvent
 
 
@@ -97,3 +97,39 @@ class TestEmitValidatesAtConstruction:
         # the abstract base instead of a concrete subclass).
         with pytest.raises(ValueError, match="event name"):
             emit(BaseEvent())
+
+
+class TestEmitSubscribers:
+    """In-process live listeners (e.g. CostMonitorHook watching LLM_CALL)."""
+
+    @pytest.fixture(autouse=True)
+    def _cleanup(self):
+        yield
+        reset_subscribers()
+
+    def test_subscriber_receives_the_emitted_event(self) -> None:
+        received: list[BaseEvent] = []
+        subscribe("__PING__", received.append)
+
+        event = _PingEvent(note="live")
+        emit(event)
+
+        assert received == [event]
+
+    def test_subscriber_for_other_event_name_is_not_called(self) -> None:
+        received: list[BaseEvent] = []
+        subscribe("__OTHER__", received.append)
+
+        emit(_PingEvent(note="live"))
+
+        assert received == []
+
+    def test_failing_subscriber_does_not_break_emit(self, log_sink) -> None:
+        def boom(_event: BaseEvent) -> None:
+            raise RuntimeError("subscriber exploded")
+
+        subscribe("__PING__", boom)
+
+        emit(_PingEvent(note="still logs"))  # must not raise
+
+        assert any("[__PING__]" in str(m) for m, _ in log_sink)

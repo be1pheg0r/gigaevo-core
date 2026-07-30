@@ -29,7 +29,7 @@ from __future__ import annotations
 
 from typing import Any, ClassVar
 
-from pydantic import BaseModel, ConfigDict, NonNegativeInt, PositiveInt, model_validator
+from pydantic import BaseModel, ConfigDict, Field, NonNegativeInt, PositiveInt, model_validator
 
 CANONICAL_EVENTS: dict[str, type[BaseEvent]] = {}
 
@@ -129,6 +129,20 @@ class LLMCall(BaseEvent):
     tokens_in: int = 0
     tokens_out: int = 0
     error_type: str | None = None
+
+
+class CostAgentAdjustment(BaseEvent):
+    event: ClassVar[str] = "COST_AGENT_ADJUSTMENT"
+    description: ClassVar[str] = "CostMonitorAgent adjusted the live cost model."
+    health_question: ClassVar[str] = "Is the cost-monitor agent making sane calls?"
+
+    mutant_index: int
+    cold_start_factor: float = -1.0
+    golden_ratio: float = -1.0
+    growth_rate_mult: float = -1.0
+    flag_outlier_indices: list[int] = Field(default_factory=list)
+    skip_calibration: bool = False
+    reasoning: str = ""
 
 
 class MetricEmit(BaseEvent):

@@ -20,6 +20,8 @@ to fire the generic `EVENT_RATE_ZERO` alert when a registered event with
 
 from __future__ import annotations
 
+from collections import defaultdict
+from collections.abc import Callable
 import json
 import time
 from typing import Any
@@ -33,6 +35,25 @@ from gigaevo.monitoring.events import BaseEvent
 # ``reset_event_counters`` (used by tests).
 _event_redis: Any | None = None
 _event_prefix: str = ""
+
+# In-process live listeners, keyed by canonical event name. Lets a
+# same-process consumer (e.g. CostMonitorHook) react to events as they
+# happen instead of tailing the log file. Best-effort: a failing callback
+# never breaks emit().
+_subscribers: dict[str, list[Callable[[BaseEvent], None]]] = defaultdict(list)
+
+
+def subscribe(event_name: str, callback: Callable[[BaseEvent], None]) -> None:
+    """Register a live in-process listener for one canonical event name.
+
+    ``event_name`` is the event's ``ClassVar[str] event`` (e.g. ``"LLM_CALL"``).
+    """
+    _subscribers[event_name].append(callback)
+
+
+def reset_subscribers() -> None:
+    """Clear all in-process listeners. Intended for tests."""
+    _subscribers.clear()
 
 # TTL for bucket keys. A week is enough for retrospective auditing while
 # keeping Redis memory bounded.
@@ -127,3 +148,10 @@ def emit(event: BaseEvent) -> None:
         f"[{name}] {json.dumps(payload, ensure_ascii=False)}"
     )
     _incr_counter(name)
+    for callback in _subscribers.get(name, ()):
+        try:
+            callback(event)
+        except Exception:
+            logger.opt(exception=True).debug(
+                "[emit] subscriber for {} failed", name
+            )

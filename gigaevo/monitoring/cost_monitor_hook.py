@@ -15,6 +15,8 @@ from gigaevo.llm.agents.cost_monitor import (
     _ToolSet,
 )
 from gigaevo.monitoring.cost_predictor import CostPrediction
+from gigaevo.monitoring.emit import emit, subscribe
+from gigaevo.monitoring.events import CostAgentAdjustment, LLMCall
 
 
 class CostMonitorHook:
@@ -31,6 +33,11 @@ class CostMonitorHook:
         self._interval = interval
         self._counter = 0
         self._call_history: list[LlmCallRecord] = []
+        subscribe(LLMCall.event, self._on_llm_call)
+
+    def _on_llm_call(self, event: LLMCall) -> None:
+        """Live subscriber — feeds every real LLM call into the history."""
+        self.add_llm_call(event.tokens_in, event.tokens_out, event.latency_ms, event.stage)
 
     async def __call__(self) -> None:
         self._counter += 1
@@ -73,6 +80,15 @@ class CostMonitorHook:
 
                 logger.info("[CostMonitorHook] adjustments: cold={} golden={} growth={} reason={}",
                             cold, golden, growth, reasoning)
+                emit(CostAgentAdjustment(
+                    mutant_index=self._counter,
+                    cold_start_factor=cold,
+                    golden_ratio=golden,
+                    growth_rate_mult=growth,
+                    flag_outlier_indices=adjustments.get("flag_outlier_indices", []),
+                    skip_calibration=adjustments.get("skip_calibration", False),
+                    reasoning=reasoning,
+                ))
         except Exception as e:
             logger.warning("[CostMonitorHook] agent call failed: {}", e)
 
