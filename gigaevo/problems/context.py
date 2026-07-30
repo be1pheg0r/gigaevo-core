@@ -44,6 +44,20 @@ class ProblemContext:
         return (self.problem_dir / PL.CONTEXT_FILE).exists()
 
     @property
+    def has_runtime_evaluation(self) -> bool:
+        """Whether metrics.yaml defines a `runtime_evaluation` section.
+
+        Problems with this section (e.g. algotune_*) need their execution
+        timed by RuntimeFitnessStage rather than relying on validate() to
+        return timing metrics itself.
+        """
+        metrics_path = self.problem_dir / PL.METRICS_FILE
+        if not metrics_path.exists():
+            return False
+        data = yaml.safe_load(metrics_path.read_text())
+        return isinstance(data, dict) and "runtime_evaluation" in data
+
+    @property
     def metrics_context(self) -> MetricsContext:
         if self._metrics_context is None:
             self._metrics_context = self._load_metrics_context()

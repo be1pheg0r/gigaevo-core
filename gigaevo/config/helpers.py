@@ -4,7 +4,10 @@ from typing import Any
 
 from omegaconf import DictConfig, OmegaConf
 
-from gigaevo.entrypoint.default_pipelines import ContextPipelineBuilder
+from gigaevo.entrypoint.default_pipelines import (
+    AlgoTuneSpeedPipelineBuilder,
+    ContextPipelineBuilder,
+)
 from gigaevo.entrypoint.evolution_context import EvolutionContext
 from gigaevo.entrypoint.lineage_memory_pipeline import IntraMemoryPipelineBuilder
 from gigaevo.evolution.strategies.base import EvolutionStrategy
@@ -175,10 +178,22 @@ def select_pipeline_builder(
     + ``MutationSuggestionStage`` without the cross-population extra channel
     and is the canonical regression-benchmark contract.
 
+    Contextual problems whose ``metrics.yaml`` declares a
+    ``runtime_evaluation`` section (e.g. all ``algotune_*`` problems) get
+    ``AlgoTuneSpeedPipelineBuilder``, which adds the ``RuntimeFitnessStage``
+    that times ``entrypoint()`` and supplies ``execution_time_sec``/
+    ``fitness``/``timing_repetitions``/``warmup_repetitions``. Without it,
+    ``validate()`` alone never returns those keys and ``EnsureMetricsStage``
+    fails every program with "Missing required metric keys".
+
     ``archive_gate_enabled`` enables the ArchivePotentialGateStage that
     short-circuits InsightsStage for programs dominated in every island.
     """
     if problem_context.is_contextual:
+        if problem_context.has_runtime_evaluation:
+            return AlgoTuneSpeedPipelineBuilder(
+                evolution_context, archive_gate_enabled=archive_gate_enabled
+            )
         return ContextPipelineBuilder(
             evolution_context, archive_gate_enabled=archive_gate_enabled
         )

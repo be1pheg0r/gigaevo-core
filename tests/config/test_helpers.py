@@ -21,6 +21,7 @@ from gigaevo.config.helpers import (
 )
 from gigaevo.database.program_storage import ProgramStorage
 from gigaevo.entrypoint.default_pipelines import (
+    AlgoTuneSpeedPipelineBuilder,
     ContextPipelineBuilder,
     DefaultPipelineBuilder,
 )
@@ -68,12 +69,17 @@ def _make_metrics_context() -> MetricsContext:
     )
 
 
-def _make_problem_context(*, is_contextual: bool = False) -> ProblemContext:
+def _make_problem_context(
+    *, is_contextual: bool = False, has_runtime_evaluation: bool = False
+) -> ProblemContext:
     """Create a mock ProblemContext."""
     ctx = MagicMock(spec=ProblemContext)
     ctx.problem_dir = Path("/fake/problem")
     ctx.metrics_context = _make_metrics_context()
     type(ctx).is_contextual = PropertyMock(return_value=is_contextual)
+    type(ctx).has_runtime_evaluation = PropertyMock(
+        return_value=has_runtime_evaluation
+    )
     return ctx
 
 
@@ -386,6 +392,23 @@ class TestSelectPipelineBuilder:
 
         builder = select_pipeline_builder(problem_ctx, evo_ctx)
         assert isinstance(builder, ContextPipelineBuilder)
+        assert not isinstance(builder, AlgoTuneSpeedPipelineBuilder)
+
+    def test_selects_algotune_speed_for_runtime_evaluation_problem(self):
+        """Contextual problems whose metrics.yaml declares a
+        `runtime_evaluation` section (all algotune_* problems) must get
+        AlgoTuneSpeedPipelineBuilder, or EnsureMetricsStage fails every
+        program with "Missing required metric keys" (execution_time_sec,
+        fitness, timing_repetitions, warmup_repetitions never get produced).
+        """
+        problem_ctx = _make_problem_context(
+            is_contextual=True, has_runtime_evaluation=True
+        )
+        evo_ctx = _make_evolution_context()
+        evo_ctx.problem_ctx = problem_ctx
+
+        builder = select_pipeline_builder(problem_ctx, evo_ctx)
+        assert isinstance(builder, AlgoTuneSpeedPipelineBuilder)
 
 
 # ===================================================================
