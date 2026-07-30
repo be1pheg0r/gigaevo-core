@@ -49,6 +49,29 @@ def _best_parseable(code: str) -> str | None:
     return None
 
 
+_GIGAEVO_IMPORT_RE = re.compile(r"^\s*(?:from|import)\s+(gigaevo(?:\.\w+)*)", re.MULTILINE)
+
+
+def _new_gigaevo_import(stub_code: str, code: str) -> str | None:
+    """Return a hallucinated ``gigaevo.*`` import the model added that
+    wasn't already in the stub, or None.
+
+    The exec sandbox for these files does not have the ``gigaevo`` package
+    importable, and there is no shared utils library to draw extra
+    functions from -- confirmed live: the model invented
+    ``from gigaevo.problems.types.programs.utils import get_test_case,
+    get_ground_truth`` (neither function exists), crashing with
+    ModuleNotFoundError before entrypoint()/build_context() ever ran. The
+    system prompt already says not to do this; this is the deterministic
+    backstop for when it does anyway.
+    """
+    allowed = set(_GIGAEVO_IMPORT_RE.findall(stub_code))
+    for found in _GIGAEVO_IMPORT_RE.findall(code):
+        if found not in allowed:
+            return found
+    return None
+
+
 def _looks_like_unimplemented_stub(code: str) -> bool:
     """Heuristic: the model echoed the stub back instead of implementing it.
 
@@ -189,6 +212,19 @@ class CodeWriterAgent(LangGraphAgent):
                     "Response left the body as `pass` under the "
                     "'# TODO: Implement strategy' comment instead of writing "
                     "a real implementation."
+                )
+                retry_note = last_problem
+                logger.warning(
+                    "[CodeWriterAgent] attempt {}/{} for {} ({}): {}",
+                    attempt + 1, max_attempts, file_kind, problem_name, last_problem,
+                )
+                continue
+            bad_import = _new_gigaevo_import(stub_code, parseable)
+            if bad_import is not None:
+                last_problem = (
+                    f"Response added `import {bad_import}` which was not in "
+                    "the stub -- that module/those names are not real and "
+                    "the sandbox cannot import gigaevo.* at all."
                 )
                 retry_note = last_problem
                 logger.warning(

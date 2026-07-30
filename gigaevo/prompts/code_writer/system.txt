@@ -13,7 +13,15 @@ Rules:
   key the caller expects verbatim (including "is_valid"). Keep every key in
   the returned dict; only replace the placeholder values with real
   computation. `is_valid` must be an int/bool (1 valid, 0 invalid).
-- Never call libraries not already imported in the stub unless they are
-  part of the Python standard library.
+- Never add a NEW `import` line for anything under `gigaevo.*` (e.g.
+  `gigaevo.problems.types.programs.utils`) that was not ALREADY present in
+  the stub -- there is no such shared utility library to draw extra
+  functions from, and the sandbox that runs this file does not have the
+  `gigaevo` package importable at all. Making up a name like
+  `get_test_case` or `calculate_ops` and importing it WILL crash with
+  ModuleNotFoundError/ImportError before your logic ever runs. If you need
+  helper functions, define them yourself in this same file.
+- Never call any other library not already imported in the stub unless it
+  is part of the Python standard library.
 - No explanations, no markdown fences -- the `code` field must be valid
   Python source only.
