@@ -222,6 +222,26 @@ async def _write_real_code(config, target_dir: Path) -> None:
         )
         path.write_text(code, encoding="utf-8")
 
+    if config.add_context:
+        context_path = target_dir / "context.py"
+        stub = context_path.read_text(encoding="utf-8")
+        fields_desc = "\n".join(
+            f"- {k}: {v}" for k, v in (config.context_spec.fields if config.context_spec else {}).items()
+        ) or "(no field breakdown given -- use your judgement from the docstring)"
+        code = await writer.arun(
+            problem_name=config.name,
+            task_description=task_description,
+            file_kind="context",
+            file_purpose=(
+                "Build the read-only data entrypoint()/validate() receive as "
+                f"`context`. Return a real, non-empty dict -- an empty dict "
+                "means every downstream call sees no test data and is always "
+                f"rejected as invalid. Fields:\n{fields_desc}"
+            ),
+            stub_code=stub,
+        )
+        context_path.write_text(code, encoding="utf-8")
+
     validate_path = target_dir / "validate.py"
     stub = validate_path.read_text(encoding="utf-8")
     metrics_desc = "\n".join(

@@ -13,6 +13,7 @@ accepted mutant to build on).
 from __future__ import annotations
 
 import ast
+import re
 from typing import TypedDict
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
@@ -51,14 +52,18 @@ def _best_parseable(code: str) -> str | None:
 def _looks_like_unimplemented_stub(code: str) -> bool:
     """Heuristic: the model echoed the stub back instead of implementing it.
 
-    A real implementation is never a bare ``pass`` body under the leftover
-    ``# TODO: Implement strategy`` marker -- catches the model silently
-    declining to write logic (confirmed live: 2 of 3 initial_programs came
-    back byte-for-byte the original stub).
+    Any leftover ``# TODO:`` marker means a real implementation was never
+    written for that spot -- every jinja stub template
+    (initial_program/validate/context) leaves at least one such marker,
+    and a genuine implementation has no reason to keep it. Also flags a
+    context.py that still returns a bare empty dict, the other stub
+    signature (no TODO text left, but no real data either) confirmed live.
     """
-    return "# TODO: Implement strategy" in code and "pass" in code.split(
-        "# TODO: Implement strategy", 1
-    )[1]
+    if "# TODO:" in code or "# TODO :" in code:
+        return True
+    if "def build_context" in code and re.search(r"return\s*\{\s*\}", code):
+        return True
+    return False
 
 
 class CodeFile(BaseModel):
