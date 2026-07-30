@@ -296,32 +296,48 @@ class ProblemConfig(BaseModel):
 
     @model_validator(mode="after")
     def _reconcile_context_and_helper_flags(self) -> ProblemConfig:
-        """Auto-fix add_context/add_helper vs. their supporting fields.
+        """Auto-fix add_context/add_helper vs. their supporting fields, and
+        force entrypoint/validation params to match the runtime's fixed
+        calling convention exactly.
 
         Confirmed live: TaskBuilderAgent's retry budget wasn't enough here
         either -- the model sets ``context_spec``/``helper_functions``
         (clear intent to use them) but forgets to flip the matching
-        ``add_context``/``add_helper`` flag, or declares
-        ``add_context=True`` without adding a ``context`` parameter to
-        both signatures. All three are mechanically resolvable without
-        another LLM round-trip: flip the flag to match the intent already
-        expressed by the data, and append the missing parameter.
+        ``add_context``/``add_helper`` flag.
+
+        Separately (and more critically), ``CallProgramFunction._build_call``
+        / ``CallValidatorFunction._build_call`` call the user's functions
+        POSITIONALLY with a fixed argument list regardless of what
+        ``entrypoint``/``validation`` declare: ``entrypoint`` gets only
+        ``context.data`` (or nothing), ``validation`` gets
+        ``(context.data, entrypoint's return value)`` (or just the return
+        value). A model-declared extra param (e.g. an ``arr`` the model
+        wanted passed directly) is simply never filled in and crashes with
+        "missing required positional argument" the moment entrypoint runs
+        (confirmed live) -- there is no LLM round-trip that fixes this
+        better than just enforcing the real signature.
         """
         if self.context_spec is not None and not self.add_context:
             self.add_context = True
         if self.helper_functions and not self.add_helper:
             self.add_helper = True
 
-        if self.add_context:
-            for sig in (self.entrypoint, self.validation):
-                if "context" not in sig.get_param_names():
-                    sig.params.append(
-                        ParameterSpec(
-                            name="context",
-                            type_hint="dict",
-                            description="Read-only problem context from build_context().",
-                        )
-                    )
+        context_param = ParameterSpec(
+            name="context",
+            type_hint="dict",
+            description="Read-only problem context from build_context().",
+        )
+        self.entrypoint.params = [context_param] if self.add_context else []
+
+        solution_param = next(
+            (p for p in self.validation.params if p.name != "context"), None
+        ) or ParameterSpec(
+            name="solution",
+            description="The value entrypoint() returned.",
+        )
+        self.validation.params = (
+            [context_param, solution_param] if self.add_context else [solution_param]
+        )
         return self
 
     @model_validator(mode="after")

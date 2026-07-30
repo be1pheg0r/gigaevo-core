@@ -11,11 +11,21 @@ Rules you must follow:
 - Every metric needs `lower_bound`/`upper_bound` if the primary metric,
   and a `higher_is_better` value that matches the metric's real meaning
   (e.g. error metrics are `higher_is_better=False`).
-- `entrypoint` and `validation` are function signatures, not code — list
-  their parameters and return shape. If the task needs precomputed,
-  read-only problem data (e.g. fixed test cases, a dataset sample), set
-  `add_context=True` and give both signatures a `context` parameter plus
-  a `context_spec` describing what `build_context()` returns.
+- `entrypoint` and `validation` are function signatures, not code — but
+  the runtime calls them with a FIXED, non-negotiable argument list, so
+  the params you list must match it exactly:
+  - `entrypoint` receives ONLY `context` if `add_context=True`, or NO
+    arguments at all otherwise. It never receives raw data (arrays,
+    numbers, etc.) as a separate parameter -- if the task needs input
+    data, that data MUST come through `context` (built by
+    `build_context()`), never as its own entrypoint parameter.
+  - `validation` receives `(context, solution)` if `add_context=True`,
+    or just `(solution)` otherwise, where `solution` is exactly whatever
+    `entrypoint` returned. Do not add a third parameter.
+  If the task needs precomputed, read-only problem data (e.g. fixed test
+  cases, a dataset sample), set `add_context=True` and give both
+  signatures a `context` parameter plus a `context_spec` describing what
+  `build_context()` returns.
 - `name` must be a short lowercase snake_case slug with no spaces or
   path separators — it becomes a directory name.
 - Write `task_description` the way you'd brief someone who has never seen
