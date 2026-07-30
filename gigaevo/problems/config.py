@@ -196,9 +196,6 @@ class ProblemConfigValidator:
         """Run all validations, return list of error messages."""
         errors: list[str] = []
         errors.extend(cls._validate_metrics(config))
-        errors.extend(cls._validate_context_signatures(config))
-        errors.extend(cls._validate_helper_config(config))
-        errors.extend(cls._validate_context_config(config))
         return errors
 
     @staticmethod
@@ -212,31 +209,6 @@ class ProblemConfigValidator:
             errors.append(f"Exactly one metric must be primary, found {primary_count}")
         return errors
 
-    @staticmethod
-    def _validate_context_signatures(config: ProblemConfig) -> list[str]:
-        """Validate function signatures match add_context setting."""
-        if not config.add_context:
-            return []
-        errors = []
-        if "context" not in config.validation.get_param_names():
-            errors.append("add_context=True requires 'context' in validation params.")
-        if "context" not in config.entrypoint.get_param_names():
-            errors.append("add_context=True requires 'context' in entrypoint params.")
-        return errors
-
-    @staticmethod
-    def _validate_helper_config(config: ProblemConfig) -> list[str]:
-        """Validate helper configuration."""
-        if config.helper_functions and not config.add_helper:
-            return ["helper_functions specified but add_helper=False."]
-        return []
-
-    @staticmethod
-    def _validate_context_config(config: ProblemConfig) -> list[str]:
-        """Validate context configuration."""
-        if config.context_spec and not config.add_context:
-            return ["context_spec specified but add_context=False."]
-        return []
 
 
 class ProblemConfig(BaseModel):
@@ -320,6 +292,36 @@ class ProblemConfig(BaseModel):
             self.utils_imports.initial_programs = (
                 UtilsImportSpec(functions=kept) if kept else None
             )
+        return self
+
+    @model_validator(mode="after")
+    def _reconcile_context_and_helper_flags(self) -> ProblemConfig:
+        """Auto-fix add_context/add_helper vs. their supporting fields.
+
+        Confirmed live: TaskBuilderAgent's retry budget wasn't enough here
+        either -- the model sets ``context_spec``/``helper_functions``
+        (clear intent to use them) but forgets to flip the matching
+        ``add_context``/``add_helper`` flag, or declares
+        ``add_context=True`` without adding a ``context`` parameter to
+        both signatures. All three are mechanically resolvable without
+        another LLM round-trip: flip the flag to match the intent already
+        expressed by the data, and append the missing parameter.
+        """
+        if self.context_spec is not None and not self.add_context:
+            self.add_context = True
+        if self.helper_functions and not self.add_helper:
+            self.add_helper = True
+
+        if self.add_context:
+            for sig in (self.entrypoint, self.validation):
+                if "context" not in sig.get_param_names():
+                    sig.params.append(
+                        ParameterSpec(
+                            name="context",
+                            type_hint="dict",
+                            description="Read-only problem context from build_context().",
+                        )
+                    )
         return self
 
     @model_validator(mode="after")
