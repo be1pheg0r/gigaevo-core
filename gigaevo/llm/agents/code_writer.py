@@ -149,7 +149,25 @@ class CodeWriterAgent(LangGraphAgent):
                 "code": None,
                 "metadata": {},
             }
-            final_state = await self.graph.ainvoke(initial_state)
+            try:
+                final_state = await self.graph.ainvoke(initial_state)
+            except Exception as exc:  # noqa: BLE001 - LLM/parsing boundary, retry-able
+                # E.g. openai.LengthFinishReasonError: the response was cut
+                # off mid-JSON by max_tokens -- confirmed live on a verbose
+                # validate.py response. Any failure here is a transient LLM
+                # call, not a config bug, so retry with the same treatment
+                # as a bad response rather than crashing the whole pipeline.
+                last_problem = f"{type(exc).__name__}: {exc}"
+                retry_note = (
+                    f"{last_problem}\nKeep the implementation concise (fewer "
+                    "comments, no restating the docstring) so the full file "
+                    "fits in the response."
+                )
+                logger.warning(
+                    "[CodeWriterAgent] attempt {}/{} for {} ({}): {}",
+                    attempt + 1, max_attempts, file_kind, problem_name, last_problem,
+                )
+                continue
             code = final_state["code"]
 
             parseable = _best_parseable(code)

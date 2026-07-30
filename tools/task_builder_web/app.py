@@ -67,6 +67,25 @@ def _make_llm() -> ChatOpenAI:
     )
 
 
+def _make_code_llm() -> ChatOpenAI:
+    """Separate, higher-max_tokens LLM for CodeWriterAgent.
+
+    Confirmed live: a verbose validate.py response hit the shared
+    max_tokens=4096 mid-generation (openai.LengthFinishReasonError) --
+    real code files with comments routinely run longer than a
+    ProblemConfig/guard classification response.
+    """
+    return ChatOpenAI(
+        model="qwen3.5-9b",
+        api_key=os.environ["SUMMER_SCHOOL_LLM_KEY_A"],
+        base_url="http://82.202.157.243:8080/v1",
+        temperature=1.0,
+        max_tokens=8192,
+        request_timeout=180,
+        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+    )
+
+
 @dataclass
 class MutantPoint:
     mutant: int
@@ -176,7 +195,7 @@ async def _tail_seed_run(job: Job, log_path: Path) -> None:
     job.stage = "done"
 
 
-async def _write_real_code(config, target_dir: Path, llm: ChatOpenAI) -> None:
+async def _write_real_code(config, target_dir: Path) -> None:
     """Replace every scaffolded stub (``# TODO`` + ``pass``) with a real
     implementation.
 
@@ -188,7 +207,7 @@ async def _write_real_code(config, target_dir: Path, llm: ChatOpenAI) -> None:
     job stalled with 0 accepted after its full attempt budget for exactly
     this reason).
     """
-    writer = create_code_writer_agent(llm)
+    writer = create_code_writer_agent(_make_code_llm())
     task_description = config.task_description.objective
 
     for prog in config.initial_programs:
@@ -254,7 +273,7 @@ async def _run_job(job: Job) -> None:
         }
 
         job.stage = "writing_code"
-        await _write_real_code(config, target_dir, llm)
+        await _write_real_code(config, target_dir)
 
         job.stage = "seeding"
         db = _next_redis_db()
