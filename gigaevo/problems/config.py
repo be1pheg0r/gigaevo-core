@@ -210,13 +210,6 @@ class ProblemConfigValidator:
         primary_count = sum(1 for s in config.metrics.values() if s.is_primary)
         if primary_count != 1:
             errors.append(f"Exactly one metric must be primary, found {primary_count}")
-        for name, spec in config.metrics.items():
-            if spec.is_primary and (spec.lower_bound is None or spec.upper_bound is None):
-                errors.append(
-                    f"Primary metric '{name}' must define both lower_bound and "
-                    "upper_bound (required by ProblemContext._load_metrics_context "
-                    "at run.py time -- catch it here instead)."
-                )
         return errors
 
     @staticmethod
@@ -281,6 +274,30 @@ class ProblemConfig(BaseModel):
         default=None,
         description="Utils imports configuration for generated files",
     )
+
+    @model_validator(mode="after")
+    def _fill_missing_primary_bounds(self) -> ProblemConfig:
+        """Auto-fill lower_bound/upper_bound for the primary metric when missing.
+
+        ProblemContext._load_metrics_context requires both bounds on the
+        primary metric at run.py time. Confirmed live: the model does not
+        reliably self-correct this within TaskBuilderAgent's small retry
+        budget (each retry re-generates a whole new config and can
+        introduce a *different* missing-bounds metric rather than fixing
+        the one flagged) -- it's a purely mechanical property, so auto-fill
+        a generous default range instead of spending another LLM round-trip
+        on it. 1e5 matches MetricSpec's own MIN/MAX_VALUE_DEFAULT sentinel
+        magnitude, so it can never trap the auto-assigned sentinel_value
+        inside the bounds (which MetricSpec itself would reject).
+        """
+        for spec in self.metrics.values():
+            if not spec.is_primary:
+                continue
+            if spec.lower_bound is None:
+                spec.lower_bound = 0.0
+            if spec.upper_bound is None:
+                spec.upper_bound = 1e5
+        return self
 
     @model_validator(mode="after")
     def _drop_bogus_initial_program_utils_imports(self) -> ProblemConfig:
