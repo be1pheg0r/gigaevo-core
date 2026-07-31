@@ -130,6 +130,67 @@ EVENT_CLASSES = {
 }
 
 
+def hook_from_log(path: Path, *, max_in_flight: int | None = None,
+                  ci_method: str | None = "montecarlo") -> CostMonitorHook | None:
+    """Replay a log's raw events into a fresh hook and hand the hook back.
+
+    Unlike :func:`replay_log` this does not need ground truth — it is for a
+    run that is deliberately short (budget mode's precompute), where the point
+    is not to score a past prediction but to ask the hook's growth laws about
+    a horizon the run never reached. Returns None if the log has no events yet.
+
+    ``max_mutants`` on the returned hook's prediction is irrelevant here:
+    :meth:`CostMonitorHook.project_tokens` takes the horizon as an argument.
+    """
+    events: list[tuple[str, dict, float]] = []
+    t0 = None
+    line_ts = 0.0
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            mts = TS_RE.match(line)
+            if mts:
+                t = datetime.strptime(mts.group(1), "%Y-%m-%d %H:%M:%S.%f").timestamp()
+                if t0 is None:
+                    t0 = t
+                line_ts = t - t0
+            if max_in_flight is None:
+                m = MAX_IN_FLIGHT_RE.search(line)
+                if m:
+                    max_in_flight = int(m.group(1))
+            for name, pattern in RAW_EVENT_PATTERNS.items():
+                mm = pattern.search(line)
+                if mm:
+                    try:
+                        payload = json.loads(mm.group(1))
+                    except json.JSONDecodeError:
+                        break
+                    payload.pop("event", None)
+                    events.append((name, payload, line_ts))
+                    break
+    if not events:
+        return None
+
+    reset_subscribers()
+    clock_now = [0.0]
+    pred = CostPrediction(max_mutants=1, max_in_flight=max_in_flight or 8)
+    hook = CostMonitorHook(agent=NoOpCostMonitorAgent(), prediction=pred, interval=5,
+                           clock=lambda: clock_now[0], ci_method=ci_method)
+    # `emit` re-logs every event it forwards, so a replay would write the whole
+    # source log a second time into whatever process called this.
+    logger.disable("gigaevo.monitoring")
+    try:
+        for name, payload, ts in events:
+            clock_now[0] = ts
+            try:
+                event = EVENT_CLASSES[name](**payload)
+            except Exception:
+                continue
+            emit(event)
+    finally:
+        logger.enable("gigaevo.monitoring")
+    return hook
+
+
 def replay_log(path: Path, *, apply_agent: bool = False,
                outlier_policy: bool = False, ci_method: str | None = None,
                ci_checkpoint_fracs: list[float] | None = None,

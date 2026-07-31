@@ -158,6 +158,7 @@ button { cursor: pointer; }
 .stage { padding: 30px var(--pad) 80px; min-width: 0; }
 .view { display: none; }
 html[data-view="launch"]  .view[data-view="launch"],
+html[data-view="budget"]  .view[data-view="budget"],
 html[data-view="live"]    .view[data-view="live"],
 html[data-view="analyze"] .view[data-view="analyze"] { display: block; }
 
@@ -457,6 +458,32 @@ svg .axhint { fill: var(--ink-3); font-family: var(--mono); font-size: 9.5px; le
   .shell { grid-template-columns: 1fr; }
   .rail { position: static; max-height: 220px; border-right: 0; border-bottom: 1px solid var(--rule); }
   .launch-grid { grid-template-columns: 1fr; }
+}
+
+/* ─────────────────────────────────────────────── прикидка бюджета ── */
+
+.verdict { display: flex; gap: 20px; align-items: baseline; padding: 16px 0 6px; }
+.verdict__word {
+  font-family: var(--sans); font-size: 30px; font-weight: 700;
+  font-stretch: 125%; letter-spacing: -0.01em; white-space: nowrap;
+}
+.verdict__body { font-size: 14px; line-height: 1.55; }
+.verdict__body .mono { font-family: var(--mono); color: var(--ink-2); }
+.verdict__hint { margin-top: 5px; color: var(--ink-3); font-size: 12.5px; }
+
+.logtail { margin-top: 16px; }
+.logtail summary {
+  cursor: pointer; color: var(--ink-3); font-family: var(--mono); font-size: 12px;
+}
+.logtail__body {
+  margin-top: 8px; max-height: 240px; overflow: auto; background: var(--raised);
+  border: 1px solid var(--rule-soft); border-radius: var(--r); padding: 10px 12px;
+  font-family: var(--mono); font-size: 11.5px; line-height: 1.5; color: var(--ink-2);
+  white-space: pre; tab-size: 2;
+}
+
+@media (max-width: 720px) {
+  .verdict { flex-direction: column; gap: 6px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

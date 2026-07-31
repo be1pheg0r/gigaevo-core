@@ -610,3 +610,62 @@ class TestLeverGuards:
         assert hook._blunt_lever_allowed(2) is False
         assert hook._blunt_lever_allowed(None) is False
         assert hook._blunt_lever_allowed("lots") is False
+
+
+class TestBudgetMode:
+    """`project_tokens` / `affordable_attempts` — the precompute question:
+    what would N attempts cost, and how many attempts does a budget buy."""
+
+    def _hook(self, attempts: int = 10, per_attempt: int = 1000) -> CostMonitorHook:
+        pred = CostPrediction(max_mutants=1, max_in_flight=1)
+        hook = CostMonitorHook(agent=None, prediction=pred, interval=1000)
+        for i in range(attempts):
+            _call("A", per_attempt, 100.0, tokens_out=per_attempt // 10)
+            emit(MutationAttempted(mutant_id=f"m{i}"))
+        return hook
+
+    def test_projection_grows_with_the_horizon(self) -> None:
+        hook = self._hook()
+        at10 = hook.project_tokens(10)[0]
+        at100 = hook.project_tokens(100)[0]
+        at200 = hook.project_tokens(200)[0]
+        assert at10 < at100 < at200
+        # Anchored on what was actually observed: 10 attempts x ~1100 tokens.
+        assert at10 == pytest.approx(11_000, rel=0.05)
+        # A flat token series extrapolates flat, so 100 attempts is ~10x.
+        assert at100 == pytest.approx(110_000, rel=0.2)
+
+    def test_projection_never_dips_below_what_was_spent(self) -> None:
+        hook = self._hook()
+        spent = hook.project_tokens(10)[0]
+        # Asking about a horizon already passed cannot refund tokens.
+        assert hook.project_tokens(3)[0] == pytest.approx(spent)
+
+    def test_the_interval_brackets_the_point_estimate(self) -> None:
+        lo, hi = self._hook().project_tokens(100)[1]
+        point = self._hook().project_tokens(100)[0]
+        assert lo <= point <= hi
+
+    def test_budget_buys_a_horizon(self) -> None:
+        hook = self._hook()
+        n = hook.affordable_attempts(110_000)
+        assert 70 <= n <= 140, n
+        # More money buys more attempts; the answer is monotone in the budget.
+        assert hook.affordable_attempts(220_000) > n
+
+    def test_a_smaller_budget_buys_fewer_attempts(self) -> None:
+        # How the console turns one interval into a range: spend the same
+        # budget as if the run cost the top / bottom of its projection.
+        hook = self._hook()
+        point, (lo, hi) = hook.project_tokens(100)
+        assert (hook.affordable_attempts(110_000 / (hi / point))
+                <= hook.affordable_attempts(110_000)
+                <= hook.affordable_attempts(110_000 / (lo / point)))
+
+    def test_a_budget_already_overspent_is_zero_not_negative(self) -> None:
+        assert self._hook().affordable_attempts(1.0) == 0
+
+    def test_no_observations_means_no_projection(self) -> None:
+        pred = CostPrediction(max_mutants=1, max_in_flight=1)
+        hook = CostMonitorHook(agent=None, prediction=pred, interval=1000)
+        assert hook.project_tokens(100) == (0.0, (0.0, 0.0))

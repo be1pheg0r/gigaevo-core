@@ -24,6 +24,16 @@ FAILURE MODES
 - NaN or infinite values in coordinates or radii
 - Wrong number of circles (≠ 26)
 
+HELPER FUNCTIONS
+- `max_radii(centers)` -> (n,) array - the LARGEST feasible radii for those centers, exactly
+  - For fixed centers the problem is a linear program in the radii (r_i + r_j <= dist(c_i, c_j),
+    r_i <= wall clearance), so this is the optimum for that arrangement, not an approximation.
+  - Input: (n, 2) centers, Output: (n,) radii, containment and non-overlap guaranteed
+- `pack(centers)` -> (n, 3) array - centers with optimal radii attached, ready to return
+- `sum_of_radii(centers)` -> float - the fitness those centers can reach
+These are available as import from `helper.py`
+Search over the CENTERS; the radii are not worth guessing, they are solvable.
+
 PROBLEM COMPLEXITY
 This is a non-convex geometric optimization problem with many local optima. Optimal solutions typically involve variable radius sizes to efficiently fill space, strategic placement near corners and edges, dense packing patterns combining both large and small circles, and avoidance of uniform grids in favor of adaptive, irregular arrangements that better exploit available space.
 

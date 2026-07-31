@@ -314,6 +314,180 @@ function renderLedger() {
   $("#start").disabled = n === 0;
 }
 
+/* ──────────────────────────────────────────────────── прикидка ── */
+
+const B = { task: null, probe: null, timer: null };
+
+const compact = (n) =>
+  n >= 1e6 ? `${(n / 1e6).toFixed(n >= 1e7 ? 0 : 1)}M`
+  : n >= 1e3 ? `${(n / 1e3).toFixed(0)}k` : String(Math.round(n));
+
+/** Same problem list as the launch view, but single-select: a budget question
+ *  is about one task, and averaging two tasks' costs answers neither. */
+function renderBudgetTasks() {
+  const groups = new Map();
+  for (const p of S.problems) {
+    if (!groups.has(p.family)) groups.set(p.family, []);
+    groups.get(p.family).push(p);
+  }
+  const order = [...groups.keys()].sort((a, b) =>
+    a === "alphaevolve" ? -1 : b === "alphaevolve" ? 1 : a.localeCompare(b));
+
+  const bar = $("#budget-familybar");
+  bar.textContent = "";
+  bar.append(el("span", "taskfilter__label", `задач: ${S.problems.length}`));
+
+  const list = $("#budget-tasklist");
+  list.textContent = "";
+  for (const fam of order) {
+    const g = el("div", "taskgroup");
+    g.append(el("div", "taskgroup__label", fam));
+    for (const p of groups.get(fam)) {
+      const row = el("label", "task");
+      const rb = el("input");
+      rb.type = "radio";
+      rb.name = "budget-task";
+      rb.checked = B.task === p.name;
+      rb.disabled = !!(p.missing_deps && p.missing_deps.length);
+      rb.onchange = () => { B.task = p.name; renderBudgetNote(); };
+      row.append(rb, el("span", "task__name", p.label));
+      if (p.missing_deps && p.missing_deps.length) {
+        row.classList.add("task--blocked");
+        row.append(el("span", "task__warn", `нет ${p.missing_deps.slice(0, 2).join(", ")}`));
+      } else {
+        row.append(el("span", "task__seeds", `сидов: ${p.seeds}`));
+      }
+      g.append(row);
+    }
+    list.append(g);
+  }
+  renderBudgetNote();
+}
+
+function renderBudgetNote() {
+  const note = $("#budget-note");
+  note.textContent = B.task
+    ? `${B.task} — прогон на 10 попыток, обычно 3–6 минут.`
+    : "Выберите задачу.";
+  $("#budget-start").disabled = !B.task || (B.probe && B.probe.alive);
+}
+
+async function startProbe() {
+  const btn = $("#budget-start");
+  btn.disabled = true;
+  btn.textContent = "Запускаю…";
+  try {
+    const res = await post("/api/budget", {
+      task: B.task,
+      attempts: +$("#budget-attempts").value,
+      budget_tokens: +$("#budget-tokens").value,
+      llm: $("#budget-llm").value,
+    });
+    B.probe = { name: res.name, alive: true };
+    toast(`Прикидка запущена: ${res.name}`);
+    pollProbe();
+  } catch (e) {
+    toast(String(e.message), true);
+  } finally {
+    btn.textContent = "Прогнать прикидку";
+    renderBudgetNote();
+  }
+}
+
+function pollProbe() {
+  clearInterval(B.timer);
+  const step = async () => {
+    if (!B.probe) return;
+    try {
+      B.probe = { ...(await api(`/api/budget/${B.probe.name}`)), name: B.probe.name };
+    } catch (e) { toast(String(e.message), true); clearInterval(B.timer); return; }
+    renderBudgetAnswer();
+    renderBudgetNote();
+    if (!B.probe.alive) clearInterval(B.timer);
+  };
+  step();
+  B.timer = setInterval(step, 5000);
+}
+
+function renderBudgetAnswer() {
+  const box = $("#budget-answer");
+  box.textContent = "";
+  const p = B.probe;
+  if (!p) return;
+
+  const block = el("div", "block");
+  const head = el("div", "block__head");
+  head.append(el("h3", null, "Ответ"));
+  head.append(el("p", null, p.alive
+    ? "Прогон идёт — оценка уточняется с каждой попыткой."
+    : "Прогон закончен, оценка окончательная."));
+  block.append(head);
+
+  const a = p.answer;
+  if (!a) {
+    block.append(el("p", "empty", p.failed
+      ? "Прогон упал, не успев ничего замерить. Хвост лога — ниже."
+      : "Жду первых вызовов LLM…"));
+    block.append(logTail(p));
+    box.append(block);
+    return;
+  }
+
+  const VERDICT = {
+    fits: ["хватает", "var(--good)"],
+    tight: ["впритык", "var(--wake)"],
+    over: ["не хватает", "var(--crit)"],
+  };
+  const [word, color] = VERDICT[a.verdict] || ["?", "var(--ink)"];
+
+  const verdict = el("div", "verdict");
+  verdict.innerHTML =
+    `<div class="verdict__word" style="color:${color}">${word}</div>` +
+    `<div class="verdict__body">` +
+      `<div><b>${a.target_attempts}</b> попыток обойдутся примерно в ` +
+      `<b>${compact(a.predicted_tokens)}</b> токенов` +
+      `<span class="mono"> (${compact(a.ci[0])}…${compact(a.ci[1])})</span>,` +
+      ` бюджет — <b>${compact(a.budget_tokens)}</b>.</div>` +
+      `<div class="verdict__hint">Замерено на ${a.observed_attempts} попытках. ` +
+      `«Хватает» — только если верхний край интервала укладывается в бюджет.</div>` +
+    `</div>`;
+  block.append(verdict);
+
+  // The second question, and the one worth acting on when the answer to the
+  // first is no: how far does the money actually go.
+  const af = a.affordable;
+  const rows = [
+    ["если прогон встанет по верхнему краю интервала", af.cautious, "планировать по этому"],
+    ["по центральной оценке", af.point, ""],
+    ["если по нижнему краю", af.optimistic, ""],
+  ];
+  const t = el("table", "grid-table");
+  t.innerHTML =
+    `<thead><tr><th>На сколько попыток хватит ${compact(a.budget_tokens)} токенов</th>` +
+    `<th>попыток</th><th>&nbsp;</th></tr></thead><tbody>` +
+    rows.map(([lbl, n, note]) =>
+      `<tr><td>${lbl}</td><td><b>${n}</b></td>` +
+      `<td style="color:var(--ink-3)">${note}</td></tr>`
+    ).join("") + `</tbody>`;
+  block.append(t);
+
+  if (af.cautious === 0) {
+    block.append(el("p", "note",
+      "Ноль означает, что бюджет меньше того, что уже потрачено на саму прикидку — "
+      + "эти токены не вернуть."));
+  }
+  block.append(logTail(p));
+  box.append(block);
+}
+
+function logTail(p) {
+  const det = el("details", "logtail");
+  det.append(el("summary", null, `лог прикидки — ${p.stem || ""}`));
+  const pre = el("pre", "logtail__body", (p.log_lines || []).join("\n"));
+  det.append(pre);
+  return det;
+}
+
 async function launch() {
   const btn = $("#start");
   btn.disabled = true;
@@ -685,10 +859,15 @@ function renderAnalyze() {
   $("#an-title").textContent = "Автомат против автомата с агентом";
   if (!d) { box.append(el("p", "empty", "Выберите эксперимент слева.")); return; }
 
+  // Fitness first, and before the "nothing finished yet" guard: it needs only
+  // evaluated programs, so it has something to say while a run is still going,
+  // and it is the one thing here that is about the search rather than its cost.
+  box.append(fitnessBlock(d.runs));
+
   const done = d.runs.filter(usable);
   if (!done.length) {
     box.append(el("p", "empty",
-      "Пока нет ни одного прогона, где есть и ряд прогнозов, и измеренный итог. Загляните, когда добежит волна."));
+      "Прогнозы и факт появятся, когда добежит волна — пока показан только фитнес."));
     return;
   }
   const tasks = byTask(done);
@@ -1201,6 +1380,135 @@ function impactStrip(rows) {
   return wrap;
 }
 
+/* ─────────────────────────────────────────────────── фитнес ── */
+
+/** Running best, in the direction the problem's own metrics.yaml declares.
+ *  `packing_circles` maximises a sum of radii, `minimize_max_min_dist_ratio`
+ *  minimises a ratio — "best so far" is the opposite operation in each, so
+ *  the direction is read, never assumed. */
+function bestSoFar(values, higherIsBetter) {
+  const out = [];
+  let best = null;
+  for (const v of values) {
+    if (!Number.isFinite(v)) continue;
+    best = best == null ? v : (higherIsBetter ? Math.max(best, v) : Math.min(best, v));
+    out.push(best);
+  }
+  return out;
+}
+
+/** Ticks at any scale. `signedTicks` rounds to one decimal — right for
+ *  percentages, fatal for a fitness of 0.0176, where every tick collapses to
+ *  "0". Here the label keeps as many decimals as the step actually needs. */
+function niceTicks(lo, hi, n = 4) {
+  const span = hi - lo;
+  if (!(span > 0)) return [lo];
+  const mag = Math.pow(10, Math.floor(Math.log10(span / n)));
+  const step = [1, 2, 2.5, 5, 10].map((s) => s * mag).find((s) => s >= span / n) || mag * 10;
+  const dec = Math.max(0, Math.min(12, -Math.floor(Math.log10(step)) + 1));
+  const out = [];
+  for (let t = Math.ceil(lo / step) * step; t <= hi + step * 1e-9; t += step) {
+    out.push(+t.toFixed(dec));
+  }
+  return out;
+}
+
+/** The only chart here that is about the SEARCH rather than about its cost.
+ *  Everything else on this page answers "what will this run spend"; this one
+ *  answers "was the spending buying anything". */
+function fitnessBlock(runs) {
+  const withFit = runs.filter((r) => (r.fitness || []).length > 1);
+  const block = el("div", "block");
+  const head = el("div", "block__head");
+  head.append(el("h3", null, "Фитнес"));
+  head.append(el("p", null,
+    "Лучший результат на текущий момент, по оси — порядковый номер оценённой программы. "
+    + "Пунктир поперёк, если он есть, — цель из metrics.yaml задачи; направление "
+    + "(«выше лучше» или «ниже лучше») берётся оттуда же. Программы, упавшие на "
+    + "валидации, в шкалу не входят."));
+  block.append(head);
+  if (!withFit.length) {
+    block.append(el("p", "empty", "Ни один прогон ещё не оценил ни одной программы."));
+    return block;
+  }
+
+  const legend = el("div", "legend");
+  legend.innerHTML =
+    `<span style="color:var(--auto)"><i class="swatch swatch--dash"></i>автомат</span>` +
+    `<span><i class="swatch" style="background:var(--agent)"></i>автомат + агент</span>`;
+  block.append(legend);
+
+  const grid = el("div", "smalls");
+  for (const [key, c] of byTask(withFit)) {
+    const conds = ["noagent", "withagent"].filter((x) => c[x] && (c[x].fitness || []).length > 1);
+    if (!conds.length) continue;
+    const spec = (c[conds[0]].fitness_spec) || { higher_is_better: true, target: null };
+    const up = spec.higher_is_better !== false;
+
+    const cell = el("div", "small");
+    cell.append(el("div", "small__t", key));
+    const W = 300, H = 150;
+    const f = chartFrame(W, H, { l: 46, r: 8, t: 12, b: 20 });
+
+    // A failed program is logged as the metric's sentinel (-1000 when higher
+    // is better, +1000 when lower is). It is not a fitness and one of them
+    // flattens the whole chart against an axis, so it is dropped outright —
+    // it never becomes the record either way.
+    const sent = spec.sentinel;
+    const keep = (v) => Number.isFinite(v) && (sent == null || Math.abs(v - sent) > 1e-9);
+    const series = conds.map((cond) => {
+      const raw = c[cond].fitness.filter(keep);
+      return { cond, best: bestSoFar(raw, up) };
+    }).filter((s) => s.best.length);
+    if (!series.length) continue;
+    const nMax = Math.max(...series.map((s) => s.best.length));
+
+    // Domain from the record curves, not from every evaluation: a single wild
+    // first attempt (1256 on a task whose target is 12.9) would otherwise
+    // squash the part anyone is looking at into one pixel.
+    const pts = series.flatMap((s) => s.best);
+    let lo = Math.min(...pts), hi = Math.max(...pts);
+    if (Number.isFinite(spec.target)) { lo = Math.min(lo, spec.target); hi = Math.max(hi, spec.target); }
+    if (hi - lo < Math.abs(hi) * 1e-9 + 1e-12) { hi = lo + Math.abs(lo || 1) * 0.1; }
+    const pad = (hi - lo) * 0.1;
+    lo -= pad; hi += pad;
+    const clip = (v) => Math.max(lo, Math.min(hi, v));
+    yAxis(f, lo, hi, niceTicks(lo, hi, 4), up ? "выше — лучше" : "ниже — лучше");
+    xAxis(f, 1, Math.max(nMax, 2), [1, Math.round(nMax / 2) || 1, Math.max(nMax, 2)], "");
+
+    if (Number.isFinite(spec.target)) {
+      const ty = f.y(clip(spec.target), lo, hi);
+      f.svg.appendChild(svgEl("line", { x1: f.pad.l, x2: W - f.pad.r, y1: ty, y2: ty,
+        stroke: "var(--ink)", "stroke-width": 1, "stroke-dasharray": "5 4", opacity: 0.5 }));
+    }
+
+    series.forEach(({ cond, best }) => {
+      const color = cond === "withagent" ? "var(--agent)" : "var(--auto)";
+      const xs = (i) => f.x(i + 1, 1, Math.max(nMax, 2));
+      const path = svgEl("path", { class: "line", "stroke-width": 2, stroke: color,
+        d: linePath(best.map((v, i) => [xs(i), f.y(clip(v), lo, hi)])) });
+      if (cond === "noagent") path.setAttribute("stroke-dasharray", "4 3");
+      f.svg.appendChild(path);
+      bindTip(path, `<b>${COND_RU[cond]}</b><br>оценено программ: ${best.length}` +
+        `<br>рекорд: ${best[best.length - 1].toPrecision(6)}`);
+    });
+
+    cell.append(f.svg);
+    const line = series.map(({ cond, best }) => {
+      const v = best[best.length - 1];
+      const color = cond === "withagent" ? "var(--agent)" : "var(--auto)";
+      return `<span style="color:${color}">${v.toPrecision(5)}</span>`;
+    }).join(" · ");
+    const d = el("div", "small__d");
+    d.innerHTML = `рекорд ${line}` +
+      (Number.isFinite(spec.target) ? ` &nbsp;·&nbsp; цель ${spec.target}` : "");
+    cell.append(d);
+    grid.append(cell);
+  }
+  block.append(grid);
+  return block;
+}
+
 function smallMultiples(paired) {
   const block = el("div", "block");
   const head = el("div", "block__head");
@@ -1485,6 +1793,7 @@ function goto(view) {
     b.setAttribute("aria-selected", String(b.dataset.goto === view)));
   if (view === "analyze") renderAnalyze();
   if (view === "live") renderLive();
+  if (view === "budget") { renderBudgetTasks(); renderBudgetAnswer(); }
 }
 
 async function select(name) {
@@ -1510,6 +1819,7 @@ async function loadExperiments() {
 async function loadProblems() {
   S.problems = await api("/api/problems");
   renderTasks();
+  renderBudgetTasks();
 }
 
 function tick() {
@@ -1531,6 +1841,10 @@ $("#max-mutants").oninput = (e) => { $("#max-mutants-out").textContent = e.targe
 $("#wave-size").oninput = (e) => { $("#wave-size-out").textContent = e.target.value; renderLedger(); };
 $("#start").onclick = launch;
 $("#refresh-experiments").onclick = loadExperiments;
+
+$("#budget-attempts").oninput = (e) => { $("#budget-attempts-out").textContent = e.target.value; };
+$("#budget-tokens").oninput = (e) => { $("#budget-tokens-out").textContent = compact(+e.target.value); };
+$("#budget-start").onclick = startProbe;
 
 // Both views carry their own picker; they stay in sync so switching view
 // never silently changes which number you are looking at.

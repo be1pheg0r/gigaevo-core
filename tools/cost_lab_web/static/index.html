@@ -23,6 +23,7 @@
 
   <nav class="views" role="tablist" aria-label="Разделы">
     <button role="tab" data-goto="launch" aria-selected="true">Запуск</button>
+    <button role="tab" data-goto="budget" aria-selected="false">Прикидка</button>
     <button role="tab" data-goto="live" aria-selected="false">Наблюдение</button>
     <button role="tab" data-goto="analyze" aria-selected="false">Разбор</button>
   </nav>
@@ -98,6 +99,62 @@
           <p class="launch-note" id="launch-note"></p>
         </div>
       </div>
+    </section>
+
+    <!-- ─────────────────────────────────────── ПРИКИДКА ── -->
+    <section class="view" data-view="budget">
+      <div class="masthead">
+        <p class="eyebrow">Бюджет</p>
+        <h1>Сколько это будет стоить.</h1>
+        <p class="lede">
+          Задача, сколько мутаций нужно, сколько токенов есть. Консоль прогоняет
+          настоящий конвейер десять попыток и по ним отвечает: во сколько обойдётся
+          заказанное, а если бюджета не хватает — на сколько попыток его хватит.
+          Прикидка по десяти попыткам держится примерно в ±45% по точке, поэтому
+          ответ даётся диапазоном, и планировать надо по осторожному краю.
+        </p>
+      </div>
+
+      <div class="launch-grid">
+        <div class="panel panel--tasks">
+          <div class="panel__head">
+            <h3>Задача</h3>
+            <div class="chipbar" id="budget-familybar"></div>
+          </div>
+          <div class="tasklist" id="budget-tasklist"></div>
+        </div>
+
+        <div class="panel panel--params">
+          <div class="panel__head"><h3>Что нужно</h3></div>
+
+          <label class="field">
+            <span class="field__label">Попыток мутации</span>
+            <input type="range" id="budget-attempts" min="25" max="1000" step="25" value="250">
+            <output class="field__out mono" id="budget-attempts-out">250</output>
+            <span class="field__hint">Тот же счётчик, что и max_mutants: попытки, а не принятые.</span>
+          </label>
+
+          <label class="field">
+            <span class="field__label">Бюджет токенов</span>
+            <input type="range" id="budget-tokens" min="100000" max="20000000" step="100000" value="3000000">
+            <output class="field__out mono" id="budget-tokens-out">3.0M</output>
+            <span class="field__hint">Суммарно на весь прогон, ввод плюс вывод.</span>
+          </label>
+
+          <label class="field field--inline">
+            <span class="field__label">Пул моделей</span>
+            <select id="budget-llm">
+              <option value="summer_school_servers">summer_school_servers — 9B + 35B-A3B</option>
+              <option value="summer_school_27b">summer_school_27b — 27B dense</option>
+            </select>
+          </label>
+
+          <button class="primary" id="budget-start">Прогнать прикидку</button>
+          <p class="launch-note" id="budget-note"></p>
+        </div>
+      </div>
+
+      <div id="budget-answer"></div>
     </section>
 
     <!-- ───────────────────────────────────── НАБЛЮДЕНИЕ ── -->

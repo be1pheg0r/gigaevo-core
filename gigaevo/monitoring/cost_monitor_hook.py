@@ -181,6 +181,8 @@ class CostMonitorHook:
         self._flagged_calls: set[int] = set()
         # lever name -> (direction of last accepted move, wakeup it happened on)
         self._lever_dir: dict[str, tuple[int, int]] = {}
+        # horizon -> (tokens, ci); see project_tokens. Dropped on every flush.
+        self._projection_memo: dict[int, tuple[float, tuple[float, float]]] = {}
         subscribe(LLMCall.event, self._on_llm_call)
         subscribe(MutationAttempted.event, self._on_mutation_attempted)
         subscribe(BackpressureSample.event, self._on_backpressure_sample)
@@ -398,6 +400,7 @@ class CostMonitorHook:
         self._history_flush_idx = len(self._call_history)
         if not new_calls:
             return
+        self._projection_memo.clear()   # the buckets these were fitted on moved
 
         stage_tokens: dict[str, float] = {}
         stage_tokens_out: dict[str, float] = {}
@@ -530,6 +533,84 @@ class CostMonitorHook:
                 "miscoverage_rate": self._miscoverages / max(self._flushes, 1),
             }),
         )
+
+    # ---------------------------------------------------------- budget mode
+    #
+    # The live estimate answers "what will THIS run cost", with the horizon
+    # fixed at `max_mutants`. Budget mode asks the two questions you actually
+    # have before committing GPU: what would N attempts cost, and if that is
+    # more than I have, how many attempts do I get. Same per-stage growth
+    # laws, re-integrated to a different horizon — no second cost model.
+
+    def project_tokens(self, attempts_target: int) -> tuple[float, tuple[float, float]]:
+        """Total tokens this run would spend if it ran to ``attempts_target``.
+
+        Each stage fires at its own observed rate per attempt (some stages
+        skip-cascade), so the horizon scales that rate rather than the raw
+        bucket count — the same projection ``_flush_mutant_bucket`` makes
+        against ``max_mutants``.
+        """
+        if not self._tokens_by_stage:
+            return 0.0, (0.0, 0.0)
+        # `affordable_attempts` bisects over this, and the montecarlo CI is not
+        # cheap; the hook's buckets do not change while a budget question is
+        # being answered, so the horizon is a sound cache key. Invalidated by
+        # the flush that appends a new bucket.
+        hit = self._projection_memo.get(attempts_target)
+        if hit is not None:
+            return hit
+        units = {
+            stage: max(1, round(attempts_target * len(series) / max(self._attempts, 1)))
+            for stage, series in self._tokens_by_stage.items()
+        }
+        est = estimate_by_stage(
+            self._tokens_by_stage, self._latency_by_stage,
+            total_units_by_stage=units,
+            max_in_flight=self._pred.max_in_flight,
+            law_cls=RobustPowerLaw,
+            fit_tokens_by_stage=self._winsorised(self._tokens_by_stage),
+            fit_latency_by_stage=self._winsorised(self._latency_by_stage),
+            ci_method=self._ci_method,
+        )
+        out = (est.predicted_total_tokens, est.tokens_ci)
+        self._projection_memo[attempts_target] = out
+        return out
+
+    def affordable_attempts(self, budget_tokens: float, *, hi: int = 100_000) -> int:
+        """Largest attempt count whose projected spend stays inside the budget.
+
+        Answers against the POINT estimate. A 10-attempt probe is only good to
+        about ±45% on that point (measured on the 2026-07-31 logs), so a caller
+        who wants the honest range should ask three times, scaling the budget
+        by the relative width of the interval at the horizon it cares about —
+        see ``probe_answer`` in tools/cost_lab_web/app.py.
+
+        Returns 0 when even what has already been observed exceeds the budget —
+        those tokens are spent, and the projection can never go below
+        ``sum(observed)``. Bisection is valid because the projection is
+        monotone in the horizon: more attempts only ever add tail.
+        """
+        # The interval method sets the WIDTH only; the point estimate is
+        # identical either way, and montecarlo costs ~0.6 s a call against
+        # ~0.003 s for the heuristic — far too much for a 17-step bisection.
+        method, self._ci_method = self._ci_method, None
+        memo, self._projection_memo = self._projection_memo, {}
+        try:
+            spend = lambda n: self.project_tokens(n)[0]  # noqa: E731
+            lo = max(self._attempts, 1)
+            if spend(lo) > budget_tokens:
+                return 0
+            if spend(hi) <= budget_tokens:
+                return hi
+            while hi - lo > 1:
+                mid = (lo + hi) // 2
+                if spend(mid) <= budget_tokens:
+                    lo = mid
+                else:
+                    hi = mid
+            return lo
+        finally:
+            self._ci_method, self._projection_memo = method, memo
 
     async def __call__(self) -> None:
         """Engine post_step_hook — fires when a mutant is ACCEPTED.

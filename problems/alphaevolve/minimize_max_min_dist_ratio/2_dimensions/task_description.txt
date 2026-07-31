@@ -21,6 +21,15 @@ FAILURE MODES
 - Unbounded coordinates causing numerical instability
 - Float precision errors leading to degenerate point configurations
 
+HELPER FUNCTIONS
+- `distance_ratio(points)` -> float - the fitness itself: (max pairwise dist / min pairwise dist)^2
+  - Returns `inf` for a degenerate configuration instead of raising, so a search loop can just compare
+- `extreme_pairs(points)` -> ((i, j) closest, (k, l) farthest) - the only two pairs the objective
+  depends on; every other point is slack and moving it changes nothing
+- `normalize(points)` -> (n, d) array - centre at origin, scale so min distance is 1
+  - The objective is invariant under translation, rotation and scaling, so this is free
+These are available as import from `helper.py`
+
 PROBLEM COMPLEXITY
 This is a non-convex geometric optimization problem with many local minima. The optimal configuration likely involves regular patterns such as grids, hexagonal packings, or symmetric arrangements. Small coordinate changes can significantly affect the distance ratio due to changes in either the minimum or maximum pairwise distance. The search space includes discrete failure regions (duplicate points) and continuous low-fitness basins (clustered or poorly distributed configurations). Solutions must balance global uniformity with local spacing constraints.
 
