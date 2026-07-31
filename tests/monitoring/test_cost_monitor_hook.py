@@ -5,7 +5,7 @@ import pytest
 from gigaevo.monitoring.cost_monitor_hook import CostMonitorHook, _clamp_step
 from gigaevo.monitoring.cost_predictor import CostPrediction
 from gigaevo.monitoring.emit import emit, reset_subscribers
-from gigaevo.monitoring.events import BackpressureSample, LLMCall, StageExec
+from gigaevo.monitoring.events import BackpressureSample, LLMCall, MutationAttempted, StageExec
 
 
 @pytest.fixture(autouse=True)
@@ -405,3 +405,105 @@ class TestAgentFeedback:
         _call("A", 100, 10.0)
         await _fire(hook)
         assert "no previous adjustment" in agent.seen_tools.get_last_adjustment_outcome()
+
+
+class TestObserverIsNotItsOwnTelemetry:
+    """CostMonitorAgent's own LLM calls must never reach the cost model.
+
+    They go through the same LLM_CALL bus as mutations, and on real
+    alphaevolve runs they were 4.7-17.3% of all measured latency with single
+    calls 10-15x the run median — i.e. the observer was the biggest outlier
+    in its own telemetry, and was seen flagging itself as an anomaly.
+    """
+
+    @pytest.mark.asyncio
+    async def test_own_calls_are_excluded_from_the_fit(self) -> None:
+        pred = CostPrediction(max_mutants=10, max_in_flight=1)
+        hook = CostMonitorHook(agent=None, prediction=pred, interval=1000)
+
+        _call("MutationAgent", 4800, 30_000.0, tokens_out=1000)
+        _call("CostMonitorAgent", 1140, 280_660.0, tokens_out=39)
+        _call("MutationAgent", 4800, 30_000.0, tokens_out=1000)
+        await _fire(hook)
+
+        assert "CostMonitorAgent" not in hook._tokens_by_stage
+        assert "CostMonitorAgent" not in hook._latency_by_stage
+        assert hook._tokens_by_stage["MutationAgent"] == [11600.0]   # 2x(4800+1000)
+        assert len(hook._call_history) == 2          # the agent call is not indexable
+        assert len(hook._call_times) == 2            # nor does it inflate concurrency
+        assert hook._observer_calls == 1             # but it is still counted somewhere
+
+    @pytest.mark.asyncio
+    async def test_the_agentless_stub_is_excluded_too(self) -> None:
+        """Otherwise the ablation compares two different workloads."""
+        pred = CostPrediction(max_mutants=10, max_in_flight=1)
+        hook = CostMonitorHook(agent=None, prediction=pred, interval=1000)
+        _call("NoOpCostMonitorAgent", 500, 1000.0)
+        _call("MutationAgent", 100, 10.0)
+        await _fire(hook)
+        assert set(hook._tokens_by_stage) == {"MutationAgent"}
+
+    @pytest.mark.asyncio
+    async def test_own_calls_do_not_get_projected_over_the_run(self) -> None:
+        """The stage used to be extrapolated like any recurring per-mutant
+        cost: 4 buckets in 22 attempts projected to 18 agent calls over 100,
+        against a hard budget of 12 and an actual 5."""
+        pred = CostPrediction(max_mutants=100, max_in_flight=1)
+        hook = CostMonitorHook(agent=None, prediction=pred, interval=1000)
+        for i in range(4):
+            _call("MutationAgent", 1000, 1000.0, tokens_out=200)
+            _call("CostMonitorAgent", 1140, 280_000.0, tokens_out=39)
+            emit(MutationAttempted(mutant_id=f"m{i}"))     # flushes a bucket
+        # 4 buckets over 4 attempts -> 100 projected firings of MutationAgent
+        # at 1200 tokens each, and none at all of the observer.
+        assert hook._attempts == 4
+        assert set(hook._tokens_by_stage) == {"MutationAgent"}
+        assert pred.predicted_total_tokens == pytest.approx(100 * 1200, rel=0.35)
+
+
+class TestOneWakeupRunsOnce:
+    """The two dispatch paths must not both claim the same trigger."""
+
+    @pytest.mark.asyncio
+    async def test_accept_path_does_not_start_a_second_concurrent_call(self) -> None:
+        import asyncio
+
+        class SlowAgent(FakeAgent):
+            def __init__(self):
+                super().__init__()
+                self.live = 0
+                self.max_live = 0
+
+            async def acall_llm(self, state):
+                self.live += 1
+                self.max_live = max(self.max_live, self.live)
+                await asyncio.sleep(0.02)
+                self.live -= 1
+                return state
+
+        pred = CostPrediction(max_mutants=100, max_in_flight=8)
+        agent = SlowAgent()
+        hook = CostMonitorHook(agent=agent, prediction=pred, interval=1,
+                               warmup_attempts=1, cooldown_attempts=0)
+        _call("MutationAgent", 3800, 30_000.0, tokens_out=1000)
+        emit(MutationAttempted(mutant_id="m1"))       # arms + dispatches a task
+        await asyncio.sleep(0)                        # task starts, blocks on the LLM
+        assert agent.live == 1
+
+        hook._agent_due = True                        # a later flush re-arms it
+        _call("MutationAgent", 3800, 30_000.0, tokens_out=1000)
+        await asyncio.gather(hook(), hook._agent_task)
+
+        assert agent.max_live == 1, "two agent calls ran at once"
+
+    @pytest.mark.asyncio
+    async def test_the_budget_is_charged_once_per_wakeup(self) -> None:
+        pred = CostPrediction(max_mutants=100, max_in_flight=8)
+        hook = CostMonitorHook(agent=FakeAgent(), prediction=pred, interval=1,
+                               warmup_attempts=1, cooldown_attempts=0)
+        _call("MutationAgent", 100, 10.0)
+        emit(MutationAttempted(mutant_id="m1"))
+        if hook._agent_task is not None:
+            await hook._agent_task
+        await hook()                                   # accept lands right after
+        assert hook._agent_calls == 1

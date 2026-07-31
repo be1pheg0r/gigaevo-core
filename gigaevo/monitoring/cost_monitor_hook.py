@@ -45,6 +45,18 @@ NON_LLM_DURATION_STAGES = frozenset({
     "CallProgramFunction", "CallValidatorFunction", "IntraMemoryStage",
 })
 
+# The monitor's own inference is emitted as an LLM_CALL like every other agent
+# (LangGraphAgent.acall_llm tags the event with its own class name), so without
+# this it lands in the very telemetry the cost model is fitted on. Measured on
+# alphaevolve runs it was 4.7-17.3% of all observed LLM latency, with single
+# calls of 280-366s against a run median of 25-36s — i.e. the biggest outliers
+# in the run were the observer, and the agent was seen flagging them as
+# anomalies. It also made the ablation unfair: the agentless arm has no such
+# calls at all, so "with agent" was measuring a different workload.
+# Listed by name rather than read off the live agent so an offline replay of an
+# older log strips them too.
+OBSERVER_STAGES = frozenset({"CostMonitorAgent", "NoOpCostMonitorAgent"})
+
 
 class CostMonitorHook:
     """Runs CostMonitorAgent every N mutants, feeds results into CostPrediction."""
@@ -112,6 +124,13 @@ class CostMonitorHook:
         # and fires ~10 times per run, spread across the whole run.
         self._agent_due = False
         self._agent_calls = 0
+        # Claimed at DISPATCH, not inside the coroutine: a task created by
+        # ``_maybe_dispatch_agent`` has not started running when ``__call__``
+        # next fires, so clearing ``_agent_due`` in ``_run_agent`` left a
+        # window where the accept path started a second, concurrent agent
+        # call on the same evidence. Measured on the full alphaevolve
+        # ablation: 19 of 60 wakeups were the same trigger handled twice.
+        self._agent_running = False
         self._last_agent_attempt = -10**9
         self._prev_ci: tuple[float, float] | None = None
         self._trigger_reason = ""
@@ -124,6 +143,12 @@ class CostMonitorHook:
         self._warmup_attempts = warmup_attempts
         self._min_leverage = min_leverage
         self._agent_task: asyncio.Task | None = None
+        # Kept only to report what watching cost — never fed to the estimator.
+        self._observer_calls = 0
+        self._observer_latency_ms = 0.0
+        # Call indices already winsorised, so the agent can be told not to
+        # spend another wakeup rediscovering a spike it has handled.
+        self._flagged_calls: set[int] = set()
         subscribe(LLMCall.event, self._on_llm_call)
         subscribe(MutationAttempted.event, self._on_mutation_attempted)
         subscribe(BackpressureSample.event, self._on_backpressure_sample)
@@ -136,7 +161,16 @@ class CostMonitorHook:
         self._nonllm_duration_by_stage: dict[str, list[float]] = {}
 
     def _on_llm_call(self, event: LLMCall) -> None:
-        """Live subscriber — feeds every real LLM call into the history."""
+        """Live subscriber — feeds every real LLM call into the history.
+
+        Skips the monitor's own calls (see OBSERVER_STAGES): they are the cost
+        of watching, not the cost of the run, and letting them in made the
+        observer the biggest outlier in its own telemetry.
+        """
+        if event.stage in OBSERVER_STAGES:
+            self._observer_calls += 1
+            self._observer_latency_ms += event.latency_ms
+            return
         self._call_times.append((self._clock() - self._t0, event.latency_ms))
         self.add_llm_call(event.tokens_in, event.tokens_out, event.latency_ms, event.stage)
 
@@ -155,15 +189,33 @@ class CostMonitorHook:
         the call as a background task so the synchronous event path is not
         blocked, and never more than one at a time.
         """
-        if not self._agent_due or self._agent is None:
-            return
-        if self._agent_task is not None and not self._agent_task.done():
+        if not self._can_dispatch_agent():
             return
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return  # no loop (tests / offline replay) — __call__ will pick it up
+        self._claim_agent()
         self._agent_task = loop.create_task(self._run_agent(), name="cost-monitor-agent")
+
+    def _can_dispatch_agent(self) -> bool:
+        return (
+            self._agent_due
+            and self._agent is not None
+            and not self._agent_running
+            and (self._agent_task is None or self._agent_task.done())
+        )
+
+    def _claim_agent(self) -> None:
+        """Take ownership of the pending wakeup.
+
+        Both dispatch paths call this BEFORE the coroutine starts, so exactly
+        one of them can win a given trigger — see ``_agent_running``.
+        """
+        self._agent_due = False
+        self._agent_running = True
+        self._agent_calls += 1
+        self._last_agent_attempt = self._attempts
 
     def _on_backpressure_sample(self, event: BackpressureSample) -> None:
         self._last_bp = event
@@ -364,13 +416,12 @@ class CostMonitorHook:
         """
         self._counter += 1
         self._flush_mutant_bucket()
-        if self._agent_due and self._agent is not None:
+        if self._can_dispatch_agent():
+            self._claim_agent()
             await self._run_agent()
 
     async def _run_agent(self) -> None:
-        self._agent_due = False
-        self._agent_calls += 1
-        self._last_agent_attempt = self._attempts
+        """Run one wakeup. The caller must have claimed it via ``_claim_agent``."""
         trigger = self._trigger_reason
 
         # Build tool context from real live state, not fixed placeholders —
@@ -404,6 +455,7 @@ class CostMonitorHook:
             predicted_duration_s=self._pred.predicted_duration_s,
             trigger_reason=trigger,
             last_adjustment=self._last_adjustment,
+            already_flagged=sorted(self._flagged_calls),
         )
         self._agent.tools = tools
 
@@ -466,6 +518,10 @@ class CostMonitorHook:
                 ))
         except Exception as e:
             logger.warning("[CostMonitorHook] agent call failed: {}", e)
+        finally:
+            # Release the claim only once this wakeup is fully done, so the
+            # other dispatch path cannot start a second concurrent call.
+            self._agent_running = False
 
     def _log_agent_trace(self, tools, trigger: str, adjustments: dict,
                           before: dict | None = None) -> None:
@@ -542,6 +598,7 @@ class CostMonitorHook:
         answers "transient spike" without touching the multipliers.
         """
         for idx in call_indices:
+            self._flagged_calls.add(idx)
             entry = self._call_bucket.get(idx)
             if entry is None:
                 continue

@@ -51,6 +51,12 @@ SYSTEM_PROMPT = (
     "`get_last_adjustment_outcome()` shows what you did last time and where "
     "the estimate went afterwards.  If your last correction pushed the "
     "estimate the wrong way, undo it rather than compounding it.\n\n"
+    "`get_progress()` gives the two measured terms of the estimate and the "
+    "measured concurrency.  Every tool's output is already written out for "
+    "you below — you cannot call them, so work only from what is shown.\n\n"
+    "Calls marked ALREADY FLAGGED have been winsorised out of the fit "
+    "already.  Do not flag them again: it changes nothing and spends a "
+    "wakeup.  Your own calls do not appear in this telemetry at all.\n\n"
     "## How the estimate you are correcting is built\n"
     "`predicted_duration = elapsed_so_far + remaining_service_time / "
     "achieved_concurrency`.  `elapsed_so_far` is measured, not guessed — your "
@@ -72,6 +78,8 @@ SYSTEM_PROMPT = (
     "- `skip_calibration`: bool — skip the next scheduled calibration\n"
     "- `reasoning`: string ≤ 80 chars — why you made these decisions\n\n"
     "## Decision rules\n"
+    "0. A call marked SLOW is 2.5×+ the median LATENCY of the window; tokens "
+    "in this system barely vary, so judge spikes on latency, not size\n"
     "1. Single-call spike (one call 3× median, rest normal) → flag outlier\n"
     "2. Sustained token growth (last 5 calls trending up) → raise growth_rate_mult\n"
     "3. Latency rising while tokens_out flat → server contention, lower "
@@ -139,6 +147,7 @@ class _ToolSet:
         predicted_duration_s: float = 0.0,
         trigger_reason: str = "",
         last_adjustment: dict[str, Any] | None = None,
+        already_flagged: list[int] | None = None,
     ):
         self._calls = recent_calls
         self._diff = program_diff
@@ -158,25 +167,40 @@ class _ToolSet:
         self._pred_duration = predicted_duration_s
         self._trigger = trigger_reason
         self._last_adj = last_adjustment
+        self._flagged = set(already_flagged or ())
         # Accumulated adjustments
         self.adjustments: dict[str, Any] = {}
 
     # ── Observability tools ────────────────────────────────────────────────
 
     def get_recent_calls(self, n: int = 10) -> str:
-        """Return the last N LLM calls as a compact table."""
+        """Return the last N LLM calls as a compact table.
+
+        Outliers are marked on LATENCY, not tokens. Measured across the
+        alphaevolve runs, token max/median per call is 1.6-2.5x — under the
+        2.5x threshold the marker used, so it essentially never fired and the
+        model was left recomputing spikes by hand off the ``lat=`` column.
+        Latency max/median is 11-27x, which is where the spikes actually are.
+        Already-flagged calls are labelled so a wakeup is not spent
+        rediscovering a spike that has already been winsorised.
+        """
         calls = self._calls[-n:]
         if not calls:
             return "(no LLM calls yet)"
+        median_lat = _median([c.latency_ms for c in calls])
+        median_tok = _median([c.tokens_in + c.tokens_out for c in calls])
         lines = [f"Last {len(calls)} LLM calls:"]
-        tokens = [c.tokens_in + c.tokens_out for c in calls]
-        median_tok = _median(tokens)
         for c in calls:
-            marker = ""
-            if (c.tokens_in + c.tokens_out) > median_tok * 2.5:
-                marker = " ← OUTLIER"
+            if c.index in self._flagged:
+                marker = " ← ALREADY FLAGGED (do not flag again)"
+            elif median_lat > 0 and c.latency_ms > median_lat * 2.5:
+                marker = f" ← SLOW ({c.latency_ms / median_lat:.1f}x median latency)"
+            else:
+                marker = ""
             lines.append(c.to_line() + marker)
-        lines.append(f"Median tokens: {median_tok}")
+        lines.append(f"Median latency: {median_lat:.0f}ms · median tokens: {median_tok:.0f}")
+        if self._flagged:
+            lines.append(f"Already flagged this run: {sorted(self._flagged)}")
         return "\n".join(lines)
 
     def get_program_diff(self) -> str:
@@ -342,29 +366,39 @@ class CostMonitorAgent(LangGraphAgent):
         return await self.graph.ainvoke(state or {"messages": []})
 
     def build_prompt(self, state: dict[str, Any]) -> list[BaseMessage]:
+        """Inline every tool's output into the prompt.
+
+        The tools are not callable by the model — whatever is not written here
+        the agent never sees. ``get_trigger``, ``get_progress`` and
+        ``get_last_adjustment_outcome`` used to be omitted while the system
+        prompt told the agent to consult them, so it decided without knowing
+        why it was woken, how far along the run was, or whether its previous
+        correction had helped. Ordered from the question ("why am I awake")
+        through the evidence to the levers.
+        """
         tools = self._tools
 
-        # Build rich context — embed tool outputs inline
-        calls_table = tools.get_recent_calls(15)
-        bp = tools.get_backpressure()
-        params = tools.get_model_params()
-        diff = tools.get_program_diff()
-
         context = (
-            f"{calls_table}\n\n"
-            f"{bp}\n"
-            f"{params}\n\n"
-            f"Program diff:\n{diff[:2000] if diff else '(none)'}"
+            f"WHY YOU ARE AWAKE\n{tools.get_trigger()}\n\n"
+            f"RUN PROGRESS\n{tools.get_progress()}\n\n"
+            f"YOUR PREVIOUS DECISION\n{tools.get_last_adjustment_outcome()}\n\n"
+            f"RECENT LLM CALLS\n{tools.get_recent_calls(15)}\n\n"
+            f"PIPELINE\n{tools.get_backpressure()}\n"
+            f"CURRENT MODEL PARAMS\n{tools.get_model_params()}\n\n"
+            f"PROGRAM DIFF\n{(tools.get_program_diff() or '(none)')[:2000]}"
         )
 
         user = HumanMessage(content=(
             f"{context}\n\n"
-            "Analyse the telemetry above.  If adjustments are needed, respond "
-            "with a JSON object:\n"
+            "Analyse the telemetry above and answer the trigger specifically. "
+            "Respond with a JSON object:\n"
             '{"cold_start_factor": float, "golden_ratio": float, '
-            '"growth_rate_mult": float, "flag_outlier_indices": [int], '
+            '"growth_rate_mult": float, "concurrency_mult": float, '
+            '"flag_outlier_indices": [int], '
             '"skip_calibration": bool, "reasoning": "..."}\n\n'
-            "Use -1 for any parameter you do NOT want to change."
+            "Use -1 for any parameter you do NOT want to change. Changing "
+            "nothing (every value -1, no indices) is a valid and often correct "
+            "answer — say why in `reasoning`."
         ))
         return [SystemMessage(content=SYSTEM_PROMPT), user]
 
@@ -389,11 +423,19 @@ class CostMonitorAgent(LangGraphAgent):
         cold = data.get("cold_start_factor", -1)
         golden = data.get("golden_ratio", -1)
         growth = data.get("growth_rate_mult", -1)
+        # concurrency_mult used to be dropped here — not passed to adjust_model
+        # and not copied into cost_adjustments — while the system prompt calls
+        # it "the only lever that touches the divisor" and three of the seven
+        # decision rules require it. The agent diagnosed server contention
+        # correctly and then had to reach for golden_ratio, which the prompt
+        # explicitly forbids in that case.
+        conc = data.get("concurrency_mult", -1)
         outliers = data.get("flag_outlier_indices", [])
         skip = data.get("skip_calibration", False)
         reasoning = data.get("reasoning", "")
 
-        tools.adjust_model(cold_start_factor=cold, golden_ratio=golden, growth_rate_mult=growth)
+        tools.adjust_model(cold_start_factor=cold, golden_ratio=golden,
+                           growth_rate_mult=growth, concurrency_mult=conc)
 
         for idx in outliers:
             tools.flag_as_outlier(idx)
@@ -405,6 +447,7 @@ class CostMonitorAgent(LangGraphAgent):
             "cold_start_factor": tools.adjustments.get("cold_start_factor", -1),
             "golden_ratio": tools.adjustments.get("golden_ratio", -1),
             "growth_rate_mult": tools.adjustments.get("growth_rate_mult", -1),
+            "concurrency_mult": tools.adjustments.get("concurrency_mult", -1),
             "flag_outlier_indices": tools.adjustments.get("flag_outlier_indices", []),
             "skip_calibration": tools.adjustments.get("skip_calibration", False),
             "reasoning": reasoning,
