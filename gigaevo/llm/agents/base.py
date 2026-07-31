@@ -18,6 +18,8 @@ from loguru import logger
 from gigaevo.llm.models import (
     MultiModelRouter,
     get_last_token_usage,
+    get_span_token_usage,
+    reset_token_usage_span,
     get_selected_model,
 )
 from gigaevo.llm.token_tracking import llm_stage_context
@@ -98,6 +100,7 @@ class LangGraphAgent(ABC):
             Updated state with llm_response field
         """
         t0 = time.monotonic()
+        reset_token_usage_span()
         error_type: str | None = None
         ok = False
         try:
@@ -124,7 +127,9 @@ class LangGraphAgent(ABC):
                 model = getattr(self.llm, "model_name", None) or (
                     get_selected_model() or "unknown"
                 )
-                usage = get_last_token_usage()
+                # Span total, not last call — retries/fallbacks inside one
+                # agent call are billed too (see get_span_token_usage).
+                usage = get_span_token_usage() or get_last_token_usage()
                 _emit_event(
                     LLMCall(
                         stage=self.__class__.__name__,

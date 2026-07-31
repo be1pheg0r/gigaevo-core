@@ -31,6 +31,7 @@ import argparse
 import json
 import re
 import sys
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -39,15 +40,18 @@ from build_report import build_error_decay_png, build_table_png, build_table_tex
 from loguru import logger
 
 from gigaevo.llm.agents.cost_monitor import NoOpCostMonitorAgent
-from gigaevo.monitoring.cost_monitor_hook import CostMonitorHook
+from gigaevo.monitoring.cost_monitor_hook import CostMonitorHook, _clamp_step
 from gigaevo.monitoring.cost_predictor import CostPrediction
 from gigaevo.monitoring.emit import emit, reset_subscribers
 from gigaevo.monitoring.events import BackpressureSample, LLMCall, MutationAttempted, StageExec
 
+TS_RE = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d+)")
 MAX_MUTANTS_RE = re.compile(r"Evolution running \(max_mutants=(\d+)\)")
 MAX_IN_FLIGHT_RE = re.compile(r"max_in_flight=(\d+)")
 DUR_RE = re.compile(r"Duration: ([\d.]+)s")
 TOK_RE = re.compile(r"\[TokenTracker:(\w+)\] ([\w.\-]+): \d+ ctx \+ \d+ gen \(\d+ reasoning\) = \d+ \(cumulative: (\d+)\)")
+ADJ_RE = re.compile(
+    r"\[CostMonitorHook\] adjustments: cold=(\S+) golden=(\S+) growth=(\S+)(?: conc=(\S+))?")
 
 RAW_EVENT_PATTERNS = {
     "LLM_CALL": re.compile(r"\[LLM_CALL\] (\{.*\})"),
@@ -63,7 +67,8 @@ EVENT_CLASSES = {
 }
 
 
-def replay_log(path: Path) -> dict | None:
+def replay_log(path: Path, *, apply_agent: bool = False,
+               outlier_policy: bool = False) -> dict | None:
     """Parse ``path``'s raw events + ground truth, replay the events through
     a fresh CostMonitorHook using the currently-installed code, and return a
     summary dict shaped like build_report.summarize()'s output — or None if
@@ -71,9 +76,22 @@ def replay_log(path: Path) -> dict | None:
     max_mutants = max_in_flight = actual_duration = None
     tok_cum: dict[str, int] = {}
     events_in_order: list[tuple[str, dict]] = []
+    # CostMonitorAgent's own historical decisions, replayed in place so the
+    # deterministic estimator can be A/B'd against estimator+agent on the very
+    # same event stream. The agent's LLM call itself is not re-run — these are
+    # the multipliers it actually chose during the original run.
+    adjustments: list[tuple[float, float, float, float]] = []
 
+    t0 = None
+    line_ts = 0.0
     with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
+            mts = TS_RE.match(line)
+            if mts:
+                t = datetime.strptime(mts.group(1), "%Y-%m-%d %H:%M:%S.%f").timestamp()
+                if t0 is None:
+                    t0 = t
+                line_ts = t - t0
             if max_mutants is None:
                 m = MAX_MUTANTS_RE.search(line)
                 if m:
@@ -88,6 +106,16 @@ def replay_log(path: Path) -> dict | None:
             m = TOK_RE.search(line)
             if m:
                 tok_cum[m.group(2)] = int(m.group(3))
+            m = ADJ_RE.search(line)
+            if m:
+                def _f(v):
+                    try:
+                        return float(v)
+                    except (TypeError, ValueError):
+                        return -1.0
+                adjustments.append((line_ts, _f(m.group(1)), _f(m.group(2)),
+                                    _f(m.group(3)), _f(m.group(4))))
+                continue
             for name, pattern in RAW_EVENT_PATTERNS.items():
                 mm = pattern.search(line)
                 if mm:
@@ -96,7 +124,7 @@ def replay_log(path: Path) -> dict | None:
                     except json.JSONDecodeError:
                         break
                     payload.pop("event", None)
-                    events_in_order.append((name, payload))
+                    events_in_order.append((name, payload, line_ts))
                     break
 
     if max_mutants is None or max_in_flight is None or not events_in_order:
@@ -108,19 +136,68 @@ def replay_log(path: Path) -> dict | None:
     reset_subscribers()
     try:
         pred = CostPrediction(max_mutants=max_mutants, max_in_flight=max_in_flight)
-        hook = CostMonitorHook(agent=NoOpCostMonitorAgent(), prediction=pred, interval=5)  # noqa: F841
+        # The anchored duration model reads wall time; drive it from the log's
+        # own timestamps so a replay reproduces what the live run would have
+        # predicted, not how fast the replay itself runs.
+        clock_now = [0.0]
+        hook = CostMonitorHook(  # noqa: F841
+            agent=NoOpCostMonitorAgent(), prediction=pred, interval=5,
+            clock=lambda: clock_now[0],
+        )
 
+        pending_adj = list(adjustments) if apply_agent else []
         series = []
-        for name, payload in events_in_order:
+        for name, payload, ts in events_in_order:
+            clock_now[0] = ts
+            while pending_adj and pending_adj[0][0] <= ts:
+                _, cold, golden, growth, conc = pending_adj.pop(0)
+                if cold > 0:
+                    pred.llm_cold_override = cold
+                if golden > 0:
+                    pred.llm_golden_override = _clamp_step(
+                        pred.llm_golden_override if pred.llm_golden_override > 0 else 1.0, golden)
+                if growth > 0:
+                    pred.llm_growth_override = _clamp_step(
+                        pred.llm_growth_override if pred.llm_growth_override > 0 else 1.0, growth)
+                if conc > 0:
+                    pred.llm_concurrency_override = _clamp_step(
+                        pred.llm_concurrency_override if pred.llm_concurrency_override > 0 else 1.0,
+                        conc)
             try:
                 event = EVENT_CLASSES[name](**payload)
             except Exception:
                 continue
             emit(event)
             if name == "MUTATION_ATTEMPTED":
+                # Offline there is no async loop, so the hook never dispatches
+                # the agent and ``_agent_due`` would latch True forever.
+                # Consume the trigger exactly as _run_agent() would, so the
+                # replay reproduces the real wake-up CADENCE (the LLM call
+                # itself still isn't reproduced — see the module docstring).
+                fired = hook._agent_due
+                if fired:
+                    hook._agent_due = False
+                    hook._agent_calls += 1
+                    hook._last_agent_attempt = hook._attempts
+                    if outlier_policy:
+                        # Deterministic stand-in for the LLM's judgement, so the
+                        # MECHANISM can be measured separately from the model's
+                        # answers: on every wake-up, flag the single biggest
+                        # call in the recent window if it dwarfs the median.
+                        recent = hook._call_history[-20:]
+                        if len(recent) >= 5:
+                            lats = sorted(r.latency_ms for r in recent)
+                            med = lats[len(lats) // 2]
+                            worst = max(recent, key=lambda r: r.latency_ms)
+                            if med > 0 and worst.latency_ms > 2.5 * med:
+                                hook._flag_outliers([worst.index])
                 series.append({
+                    "agent_due": fired,
                     "predicted_tokens": pred.predicted_total_tokens,
                     "predicted_duration_s": pred.predicted_duration_s,
+                    "ci_low_s": pred.ci_low_s,
+                    "ci_high_s": pred.ci_high_s,
+                    "elapsed_s": ts,
                 })
     finally:
         reset_subscribers()
@@ -130,6 +207,10 @@ def replay_log(path: Path) -> dict | None:
     last = series[-1]
     return dict(
         path=str(path), n_points=len(series), series=series,
+        # only decisions that actually moved a multiplier; the agent's
+        # "everything normal" answer logs all -1 and changes nothing
+        n_trigger_fires=sum(1 for x in series if x["agent_due"]),
+        n_agent_adjustments=sum(1 for a in adjustments if any(v > 0 for v in a[1:])),
         pred_tokens=last["predicted_tokens"], pred_duration=last["predicted_duration_s"],
         actual_tokens=actual_tokens, actual_duration=actual_duration,
         tok_err_pct=(last["predicted_tokens"] - actual_tokens) / actual_tokens * 100,

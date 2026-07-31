@@ -157,6 +157,7 @@ class CostAgentAdjustment(BaseEvent):
     cold_start_factor: float = -1.0
     golden_ratio: float = -1.0
     growth_rate_mult: float = -1.0
+    concurrency_mult: float = -1.0
     flag_outlier_indices: list[int] = Field(default_factory=list)
     skip_calibration: bool = False
     reasoning: str = ""

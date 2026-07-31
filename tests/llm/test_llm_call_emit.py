@@ -97,3 +97,61 @@ class TestLLMCallEmits:
         assert body["event"] == "LLM_CALL"
         assert body["ok"] is False
         assert body["error_type"] == "RuntimeError"
+
+
+class TestRetriedCallsAreFullyBilled:
+    async def test_tokens_sum_every_invocation_in_one_agent_call(self, log_sink):
+        """A retry inside one ``acall_llm`` is billed by TokenTracker, so the
+        LLM_CALL event must report the SPAN total, not just the last
+        invocation — otherwise the cost monitor systematically undercounts
+        (measured at 13-17% on the 2026-07-31 runs)."""
+        from gigaevo.llm.models import _remember_token_usage
+
+        def _resp(ctx: int, gen: int):
+            r = MagicMock()
+            r.response_metadata = {
+                "token_usage": {"prompt_tokens": ctx, "completion_tokens": gen,
+                                "total_tokens": ctx + gen}
+            }
+            return r
+
+        async def _ainvoke_with_one_retry(_messages):
+            _remember_token_usage(_resp(1000, 100))  # first attempt, failed parse
+            _remember_token_usage(_resp(1200, 150))  # retry, succeeded
+            return MagicMock(content="ok")
+
+        llm = MagicMock()
+        llm.ainvoke = AsyncMock(side_effect=_ainvoke_with_one_retry)
+        llm.model_name = "fake-model"
+
+        await _TestAgent(llm).acall_llm({"messages": ["hi"]})
+
+        body = _body(_llm_call_lines(log_sink)[0])
+        assert body["tokens_in"] == 2200
+        assert body["tokens_out"] == 250
+
+    async def test_span_resets_between_agent_calls(self, log_sink):
+        from gigaevo.llm.models import _remember_token_usage
+
+        def _resp(ctx: int, gen: int):
+            r = MagicMock()
+            r.response_metadata = {
+                "token_usage": {"prompt_tokens": ctx, "completion_tokens": gen,
+                                "total_tokens": ctx + gen}
+            }
+            return r
+
+        async def _ainvoke(_messages):
+            _remember_token_usage(_resp(500, 50))
+            return MagicMock(content="ok")
+
+        llm = MagicMock()
+        llm.ainvoke = AsyncMock(side_effect=_ainvoke)
+        llm.model_name = "fake-model"
+        agent = _TestAgent(llm)
+
+        await agent.acall_llm({"messages": ["hi"]})
+        await agent.acall_llm({"messages": ["hi"]})
+
+        bodies = [_body(line) for line in _llm_call_lines(log_sink)]
+        assert [b["tokens_in"] for b in bodies] == [500, 500]

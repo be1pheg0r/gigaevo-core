@@ -1,9 +1,9 @@
 """CostMonitorAgent — LLM-powered cost model adjuster.
 
-Runs periodically (every N mutants) and analyses recent LLM telemetry
-to decide whether token/latency spikes are transient or indicative of a
-regime change.  Returns structured adjustments that feed into
-``calibrate_prediction()``.
+Woken by CostMonitorHook when the live estimate breaches the confidence
+interval its own previous estimate published (not on a fixed tick), and
+decides whether that surprise is a transient outlier or a regime change.
+Returns structured adjustments consumed by ``CostMonitorHook``.
 
 Tool set
 --------
@@ -11,8 +11,11 @@ get_recent_calls(n)          — last N LLM_CALL records (tokens, latency, stage
 get_program_diff(program_id) — diff of the mutated program vs its parent
 get_backpressure()           — current pipeline backpressure snapshot
 get_model_params()           — current cost model state (cold_factor, golden, …)
+get_progress()               — attempts, measured elapsed vs predicted remaining
+get_trigger()                — why this call was woken up
+get_last_adjustment_outcome()— previous decision and what the estimate did since
 adjust_model(params)         — apply corrections to the live cost model
-flag_as_outlier(idx)         — mark a specific call as transient (exclude from rate)
+flag_as_outlier(idx)         — winsorise that call's bucket out of the growth fit
 
 """
 from __future__ import annotations
@@ -32,26 +35,55 @@ from gigaevo.llm.agents.base import LangGraphAgent
 
 SYSTEM_PROMPT = (
     "You are a **Cost Monitor Agent** for an evolutionary code optimisation "
-    "pipeline.  Every few mutations you receive a snapshot of the last N "
-    "LLM calls (tokens, latency, stage) plus the current backpressure "
-    "state.  Your job: decide whether any cost deviations are **transient** "
-    "(single outlier — ignore) or a **regime change** (program grew, model "
-    "switched, GPU overloaded — adjust the cost model).\n\n"
+    "pipeline.  You are NOT on a timer: you are woken up when the estimator "
+    "surprises itself — its new estimate landed outside the confidence "
+    "interval its own previous estimate published.  `get_trigger()` tells you "
+    "what happened.  Your job is to explain that specific event: is it a "
+    "**transient outlier** (one slow or huge call — flag it, leave the model "
+    "alone) or a **regime change** (programs grew, model switched, servers "
+    "slowed — correct the model)?\n\n"
+    "Default to 'transient'.  Flagging an outlier is cheap and surgical: the "
+    "flagged call's bucket is winsorised out of the growth-law fit, so a spike "
+    "stops being extrapolated over the whole remaining run, and nothing else "
+    "changes.  Moving a multiplier is blunt — it applies to everything still "
+    "ahead — so only do it when the deviation has PERSISTED across several "
+    "calls, and say so in `reasoning`.\n\n"
+    "`get_last_adjustment_outcome()` shows what you did last time and where "
+    "the estimate went afterwards.  If your last correction pushed the "
+    "estimate the wrong way, undo it rather than compounding it.\n\n"
+    "## How the estimate you are correcting is built\n"
+    "`predicted_duration = elapsed_so_far + remaining_service_time / "
+    "achieved_concurrency`.  `elapsed_so_far` is measured, not guessed — your "
+    "levers only ever scale the REMAINING work or the concurrency divisor, "
+    "never wall time already spent.  `achieved_concurrency` is measured over "
+    "a trailing window: it is how many LLM calls the system really runs at "
+    "once, which is NOT the same as max_in_flight (that is the DAG mutant "
+    "dispatch cap).\n\n"
     "## Available actions (via JSON output)\n"
+    "- `golden_ratio`: float 0.8–2.0 — safety margin on remaining work\n"
+    "- `growth_rate_mult`: float 0.5–3.0 — remaining work will grow/shrink "
+    "faster than the fitted trend (compounds with golden_ratio)\n"
+    "- `concurrency_mult`: float 0.3–3.0 — the measured concurrency is about "
+    "to change (>1 = throughput recovering, <1 = servers slowing down). Use "
+    "this instead of golden_ratio when the cause is the SERVERS, not the "
+    "programs — it is the only lever that touches the divisor\n"
     "- `cold_start_factor`: float 0.3–1.0 — override warmup multiplier\n"
-    "- `golden_ratio`: float 0.8–2.0 — safety margin for GPU variance\n"
-    "- `growth_rate_mult`: float 0.5–3.0 — adjust program growth rate γ\n"
     "- `flag_outlier_indices`: list[int] — mark these call indices as outliers\n"
     "- `skip_calibration`: bool — skip the next scheduled calibration\n"
     "- `reasoning`: string ≤ 80 chars — why you made these decisions\n\n"
     "## Decision rules\n"
     "1. Single-call spike (one call 3× median, rest normal) → flag outlier\n"
-    "2. Sustained growth (last 5 calls trending up) → raise growth_rate_mult\n"
-    "3. Backpressure > 80 % → raise golden_ratio by 0.1\n"
-    "4. Backpressure < 20 % → lower golden_ratio by 0.05\n"
-    "5. Program length grew > 20 % vs baseline → raise growth_rate_mult by 0.2\n"
-    "6. Latency spike with normal tokens → GPU contention, raise golden_ratio\n"
-    "7. Everything normal → no changes (all defaults)\n"
+    "2. Sustained token growth (last 5 calls trending up) → raise growth_rate_mult\n"
+    "3. Latency rising while tokens_out flat → server contention, lower "
+    "concurrency_mult (do NOT raise golden_ratio: the work did not grow)\n"
+    "4. Achieved concurrency far below max_in_flight AND the pipeline is "
+    "starved (in_flight low, few accepts) → concurrency will stay low, "
+    "lower concurrency_mult\n"
+    "5. Achieved concurrency climbing across the window → run is still ramping "
+    "up, raise concurrency_mult slightly\n"
+    "6. Program length grew > 20 % vs baseline → raise growth_rate_mult by 0.2\n"
+    "7. Everything normal → no changes (all defaults). Prefer no change: the "
+    "measured terms are usually right, and every lever you move adds variance.\n"
 )
 
 
@@ -76,6 +108,7 @@ class _AdjustmentOutput(BaseModel):
     cold_start_factor: float = Field(default=-1.0, description="Override cold_start (−1 = no change, 0.3–1.0)")
     golden_ratio: float = Field(default=-1.0, description="Override golden_ratio (−1 = no change, 0.8–2.0)")
     growth_rate_mult: float = Field(default=-1.0, description="Multiply growth_rate γ (−1 = no change, 0.5–3.0)")
+    concurrency_mult: float = Field(default=-1.0, description="Multiply MEASURED achieved LLM concurrency (−1 = no change, 0.3–3.0)")
     flag_outlier_indices: list[int] = Field(default_factory=list, description="Indices of calls to ignore")
     skip_calibration: bool = Field(default=False)
     reasoning: str = Field(default="")
@@ -98,6 +131,14 @@ class _ToolSet:
         current_growth: float = 1.0,
         baseline_program_len: int = 0,
         current_program_len: int = 0,
+        achieved_concurrency: float = 0.0,
+        current_concurrency_mult: float = 1.0,
+        elapsed_s: float = 0.0,
+        attempts_done: int = 0,
+        max_mutants: int = 0,
+        predicted_duration_s: float = 0.0,
+        trigger_reason: str = "",
+        last_adjustment: dict[str, Any] | None = None,
     ):
         self._calls = recent_calls
         self._diff = program_diff
@@ -109,6 +150,14 @@ class _ToolSet:
         self._growth = current_growth
         self._baseline_len = baseline_program_len
         self._current_len = current_program_len
+        self._conc = achieved_concurrency
+        self._conc_mult = current_concurrency_mult
+        self._elapsed = elapsed_s
+        self._attempts = attempts_done
+        self._max_mutants = max_mutants
+        self._pred_duration = predicted_duration_s
+        self._trigger = trigger_reason
+        self._last_adj = last_adjustment
         # Accumulated adjustments
         self.adjustments: dict[str, Any] = {}
 
@@ -145,8 +194,46 @@ class _ToolSet:
         """Return current cost model parameters."""
         return (
             f"cold_start={self._cold:.2f} golden={self._golden:.2f} "
-            f"growth×={self._growth:.2f} "
+            f"growth×={self._growth:.2f} concurrency×={self._conc_mult:.2f} "
             f"program_len: {self._baseline_len}→{self._current_len}"
+        )
+
+    def get_progress(self) -> str:
+        """Return run progress and the two measured terms of the duration
+        estimate, so the agent can see WHERE the estimate comes from before
+        deciding which lever (if any) to move."""
+        rem = max(self._pred_duration - self._elapsed, 0.0)
+        return (
+            f"attempts={self._attempts}/{self._max_mutants} "
+            f"elapsed={self._elapsed:.0f}s (measured) "
+            f"remaining={rem:.0f}s (predicted) "
+            f"achieved_concurrency={self._conc:.1f} calls in parallel "
+            f"vs max_in_flight={self._max_flight} (DAG dispatch cap)"
+        )
+
+    def get_trigger(self) -> str:
+        """Why you were woken up on this particular attempt."""
+        return self._trigger or "(scheduled check, no specific anomaly)"
+
+    def get_last_adjustment_outcome(self) -> str:
+        """What your PREVIOUS decision was and what happened to the estimate
+        since — the only way to tell whether your last correction helped."""
+        a = self._last_adj
+        if not a:
+            return "(no previous adjustment this run)"
+        promised = a["predicted_duration_s"] - a["elapsed_s"]
+        spent = self._elapsed - a["elapsed_s"]
+        attempts_since = self._attempts - a["attempt"]
+        moved = [f"{k}={a[k]:.2f}" for k in ("golden", "growth", "concurrency") if a[k] > 0]
+        drift = ""
+        if promised > 1 and self._pred_duration > 0:
+            delta = (self._pred_duration - a["predicted_duration_s"]) / a["predicted_duration_s"]
+            drift = (f"; since then the estimate moved {delta:+.0%} "
+                     f"({a['predicted_duration_s']:.0f}s -> {self._pred_duration:.0f}s)")
+        return (
+            f"At attempt {a['attempt']} you set {', '.join(moved) or 'nothing'}"
+            f" and flagged {a['outliers']} outlier(s); reason: {a['reasoning'] or '(none)'}. "
+            f"{attempts_since} attempts and {spent:.0f}s have passed{drift}."
         )
 
     # ── Action tools — accumulate adjustments ──────────────────────────────
@@ -156,6 +243,7 @@ class _ToolSet:
         cold_start_factor: float = -1,
         golden_ratio: float = -1,
         growth_rate_mult: float = -1,
+        concurrency_mult: float = -1,
     ) -> str:
         """Adjust cost model parameters. −1 means 'no change'."""
         changes = []
@@ -168,6 +256,9 @@ class _ToolSet:
         if 0.3 <= growth_rate_mult <= 3.0:
             self.adjustments["growth_rate_mult"] = growth_rate_mult
             changes.append(f"growth×={growth_rate_mult:.2f}")
+        if 0.3 <= concurrency_mult <= 3.0:
+            self.adjustments["concurrency_mult"] = concurrency_mult
+            changes.append(f"concurrency×={concurrency_mult:.2f}")
         return (
             f"Adjusted: {', '.join(changes)}" if changes
             else "No adjustments made (values out of range)"
@@ -198,10 +289,14 @@ TOOL_SCHEMA = """Available tools — call via tool name with arguments:
 get_recent_calls(n=10) → table of last N LLM calls
 get_program_diff()     → diff of current vs parent program
 get_backpressure()     → pipeline in_flight/util %
-get_model_params()     → current cold/golden/growth/program_len
+get_model_params()     → current cold/golden/growth/concurrency multipliers
+get_progress()         → attempts done, measured elapsed vs predicted remaining,
+                         achieved LLM concurrency vs max_in_flight
+get_trigger()          → why you were woken up on this attempt
+get_last_adjustment_outcome() → your previous decision and what happened since
 
 Action tools:
-adjust_model(cold_start_factor=0.6, golden_ratio=1.15, growth_rate_mult=1.2)
+adjust_model(cold_start_factor=0.6, golden_ratio=1.15, growth_rate_mult=1.2, concurrency_mult=0.8)
 flag_as_outlier(index=3)
 skip_next_calibration()
 """

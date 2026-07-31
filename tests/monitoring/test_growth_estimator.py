@@ -7,11 +7,13 @@ from gigaevo.monitoring.growth_estimator import (
     LinearLaw,
     PowerLaw,
     RobustPowerLaw,
+    achieved_concurrency,
     confidence_width,
     estimate,
     estimate_by_stage,
     estimate_duration_by_stage,
     fit_ttft_tpot,
+    tail_integral,
 )
 
 
@@ -142,12 +144,63 @@ def test_estimate_duration_by_stage_uses_tokens_out_not_call_index() -> None:
     # Latency is flat regardless of call index (no growth trend), but
     # scales with tokens_out — the TTFT/TPOT model should recover that
     # even though a growth-law-over-index fit would see nothing.
-    tokens_out_by_stage = {"A": [100.0, 200.0, 100.0, 200.0]}
-    latency_by_stage = {"A": [1100.0, 2100.0, 1100.0, 2100.0]}  # ttft=100, tpot=10
+    tokens_out_by_stage = {"A": [100.0, 200.0, 200.0, 100.0]}  # no trend over index
+    latency_by_stage = {"A": [1100.0, 2100.0, 2100.0, 1100.0]}  # ttft=100, tpot=10
+    # 8 total units, 4 observed -> only the 4 remaining are predicted.
     duration_s, ci = estimate_duration_by_stage(
         tokens_out_by_stage, latency_by_stage,
-        total_units_by_stage={"A": 4}, max_in_flight=1,
+        total_units_by_stage={"A": 8}, max_in_flight=1,
     )
-    # mean tokens_out=150 -> per-call latency ~= 100+10*150=1600ms; *4 calls = 6.4s
+    # mean tokens_out=150 -> per-call latency ~= 100+10*150=1600ms; *4 remaining = 6.4s
     assert duration_s == pytest.approx(6.4, rel=0.05)
     assert ci[0] <= duration_s <= ci[1]
+
+
+def test_duration_anchors_on_elapsed_and_divides_by_achieved_concurrency() -> None:
+    tokens_out_by_stage = {"A": [100.0, 100.0]}
+    latency_by_stage = {"A": [1100.0, 1100.0]}  # ttft=0, tpot=11 -> 1100ms/unit
+    duration_s, _ = estimate_duration_by_stage(
+        tokens_out_by_stage, latency_by_stage,
+        total_units_by_stage={"A": 6}, max_in_flight=8,
+        elapsed_s=500.0, concurrency=2.0,
+    )
+    # 4 remaining units * 1100ms = 4.4s of service, at concurrency 2 -> 2.2s
+    assert duration_s == pytest.approx(502.2, rel=0.02)
+
+
+def test_duration_never_goes_negative_on_a_noisy_ttft_fit() -> None:
+    # Latency FALLS as tokens_out rises — OLS hands back a negative slope,
+    # which used to produce a negative predicted duration.
+    duration_s, _ = estimate_duration_by_stage(
+        {"A": [100.0, 200.0, 300.0]}, {"A": [3000.0, 2000.0, 1000.0]},
+        total_units_by_stage={"A": 20}, max_in_flight=4,
+    )
+    assert duration_s >= 0.0
+
+
+def test_achieved_concurrency_measures_parallelism_not_the_dispatch_cap() -> None:
+    # 20 calls of 10s each all completing within a 25s window => ~8 in parallel,
+    # even though max_in_flight says 2.
+    calls = [(5.0 + i * 1.0, 10_000.0) for i in range(20)]
+    conc = achieved_concurrency(calls, now_s=25.0, max_in_flight=2, shrink_k=0)
+    assert conc > 4.0
+    # ...but with only 20 calls of evidence the default shrinkage still keeps
+    # it close to the max_in_flight prior.
+    shrunk = achieved_concurrency(calls, now_s=25.0, max_in_flight=2)
+    assert conc > shrunk > 2.0
+
+
+def test_achieved_concurrency_falls_back_to_dispatch_cap_before_any_calls() -> None:
+    assert achieved_concurrency([], now_s=100.0, max_in_flight=8) == 8.0
+
+
+def test_tail_integral_never_undercuts_what_was_already_observed() -> None:
+    # Right-skewed buckets: a log-space fit recovers the geometric mean and
+    # would extrapolate below the observed arithmetic mean without smearing.
+    values = [100.0, 120.0, 110.0, 5000.0, 130.0, 115.0]
+    law = RobustPowerLaw.fit(values)
+    tail = tail_integral(law, values, 12)
+    assert tail >= 0.0
+    # 6 more buckets should be worth roughly what the observed 6 were worth,
+    # not the (much smaller) median-based extrapolation.
+    assert tail > sum(values) * 0.3

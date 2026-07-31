@@ -4,7 +4,10 @@ Designed as a post-step hook for the evolution engine.
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import statistics
+import time
 
 from loguru import logger
 
@@ -18,6 +21,7 @@ from gigaevo.monitoring.emit import emit, subscribe
 from gigaevo.monitoring.events import BackpressureSample, CostAgentAdjustment, LLMCall, MutationAttempted, StageExec
 from gigaevo.monitoring.growth_estimator import (
     RobustPowerLaw,
+    achieved_concurrency,
     estimate_by_stage,
     estimate_duration_by_stage,
 )
@@ -50,11 +54,21 @@ class CostMonitorHook:
         agent: CostMonitorAgent,
         prediction: CostPrediction,
         interval: int = 5,
+        clock=time.monotonic,
+        max_agent_calls: int = 12,
+        cooldown_attempts: int = 5,
+        warmup_attempts: int = 5,
+        min_leverage: float = 0.15,
     ):
         self._agent = agent
         self._pred = prediction
         self._interval = interval
         self._counter = 0
+        self._clock = clock
+        self._t0 = clock()
+        # (completion_time_s, latency_ms) per LLM call — the raw material for
+        # measuring the concurrency the system actually achieves.
+        self._call_times: list[tuple[float, float]] = []
         self._call_history: list[LlmCallRecord] = []
         # Per-stage growth-law state. The hook flushes once per accepted
         # mutant (post_step_hook, see ingestor.py) AND once per mutation
@@ -75,6 +89,36 @@ class CostMonitorHook:
         # attempts 1:1, this is the correct denominator for projecting each
         # stage's total firing count, no accept-rate correction needed.
         self._attempts = 0
+        self._concurrency = float(prediction.max_in_flight)
+        # Which bucket each LLM call landed in, so the agent's
+        # flag_outlier_indices (call indices, as shown by get_recent_calls)
+        # can be turned into bucket positions to winsorise.
+        self._call_bucket: dict[int, tuple[str, int]] = {}
+        self._flagged_buckets: dict[str, set[int]] = {}
+        # Agent scheduling: fire when the estimator is SURPRISED (the new
+        # estimate falls outside the interval the previous one claimed),
+        # not on a fixed tick. Measured on the 9 collected runs: the old
+        # every-5-accepted-mutants tick gave 0-6 calls per 100-attempt run
+        # with the first one landing anywhere from attempt 10 to 92 (and
+        # never at all on a 0%-accept task), while a raw "prediction moved
+        # >30%" trigger fired only during cold start and never once in the
+        # final third. Breaching the previous confidence interval is
+        # self-normalising — the interval is wide early and narrow late —
+        # and fires ~10 times per run, spread across the whole run.
+        self._agent_due = False
+        self._agent_calls = 0
+        self._last_agent_attempt = -10**9
+        self._prev_ci: tuple[float, float] | None = None
+        self._trigger_reason = ""
+        # Closed-loop feedback: what the previous adjustment was and what the
+        # estimate looked like when it was made, so the next call can be told
+        # whether it helped.
+        self._last_adjustment: dict | None = None
+        self._max_agent_calls = max_agent_calls
+        self._cooldown_attempts = cooldown_attempts
+        self._warmup_attempts = warmup_attempts
+        self._min_leverage = min_leverage
+        self._agent_task: asyncio.Task | None = None
         subscribe(LLMCall.event, self._on_llm_call)
         subscribe(MutationAttempted.event, self._on_mutation_attempted)
         subscribe(BackpressureSample.event, self._on_backpressure_sample)
@@ -88,11 +132,33 @@ class CostMonitorHook:
 
     def _on_llm_call(self, event: LLMCall) -> None:
         """Live subscriber — feeds every real LLM call into the history."""
+        self._call_times.append((self._clock() - self._t0, event.latency_ms))
         self.add_llm_call(event.tokens_in, event.tokens_out, event.latency_ms, event.stage)
 
     def _on_mutation_attempted(self, event: MutationAttempted) -> None:
         self._attempts += 1
         self._flush_mutant_bucket()
+        self._maybe_dispatch_agent()
+
+    def _maybe_dispatch_agent(self) -> None:
+        """Run the agent off the ATTEMPT clock, not the accepted-mutant clock.
+
+        ``__call__`` is the engine's post_step_hook and only fires when a
+        mutant is accepted, so on a low- or zero-accept task the agent used to
+        be called late or never (measured: 0 calls on both toy_kadane runs).
+        The trigger lives in the flush, which runs on every attempt; dispatch
+        the call as a background task so the synchronous event path is not
+        blocked, and never more than one at a time.
+        """
+        if not self._agent_due or self._agent is None:
+            return
+        if self._agent_task is not None and not self._agent_task.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return  # no loop (tests / offline replay) — __call__ will pick it up
+        self._agent_task = loop.create_task(self._run_agent(), name="cost-monitor-agent")
 
     def _on_backpressure_sample(self, event: BackpressureSample) -> None:
         self._last_bp = event
@@ -102,6 +168,58 @@ class CostMonitorHook:
         # future cost for that stage — only count real executions.
         if event.stage in NON_LLM_DURATION_STAGES and event.decision != "hit":
             self._stage_exec_history.append((event.stage, event.duration_ms))
+
+    def _winsorised(self, by_stage: dict[str, list[float]]) -> dict[str, list[float]]:
+        """Copy of ``by_stage`` with agent-flagged buckets replaced by the
+        median of that stage's remaining buckets.
+
+        Replaced, not dropped: the bucket index IS the growth law's x axis,
+        so removing an entry would shift every later point. The spike's real
+        cost still anchors the observed part (see growth_estimator.tail_integral) —
+        only its influence on the extrapolated tail is neutralised.
+        """
+        if not self._flagged_buckets:
+            return by_stage
+        out: dict[str, list[float]] = {}
+        for stage, vals in by_stage.items():
+            flagged = self._flagged_buckets.get(stage)
+            if not flagged:
+                out[stage] = vals
+                continue
+            keep = [v for i, v in enumerate(vals) if i not in flagged]
+            med = statistics.median(keep) if keep else 0.0
+            out[stage] = [med if i in flagged else v for i, v in enumerate(vals)]
+        return out
+
+    def _check_agent_trigger(self, duration_s: float) -> None:
+        """Decide whether this flush should wake CostMonitorAgent.
+
+        Wakes it when the estimator surprises itself — the new estimate falls
+        outside the confidence interval the previous one published — plus one
+        guaranteed early call so a run that never surprises anyone still gets
+        looked at. Gated by a cooldown, a per-run budget, and remaining
+        leverage: past ~85% of predicted wall time the agent's multiplier
+        scales an almost-empty tail and can only add noise.
+        """
+        prev, self._prev_ci = self._prev_ci, (self._pred.ci_low_s, self._pred.ci_high_s)
+        if self._agent_due or self._agent_calls >= self._max_agent_calls:
+            return
+        if self._attempts - self._last_agent_attempt < self._cooldown_attempts:
+            return
+        elapsed = self._clock() - self._t0
+        if duration_s > 0 and (duration_s - elapsed) / duration_s < self._min_leverage:
+            return
+        if self._attempts >= self._warmup_attempts and self._agent_calls == 0:
+            self._agent_due = True
+            self._trigger_reason = f"first look after {self._attempts} attempts"
+            return
+        if prev and prev[1] > prev[0] > 0 and not (prev[0] <= duration_s <= prev[1]):
+            direction = "above" if duration_s > prev[1] else "below"
+            self._agent_due = True
+            self._trigger_reason = (
+                f"estimate jumped {direction} its own interval at attempt "
+                f"{self._attempts}: {duration_s:.0f}s vs [{prev[0]:.0f}, {prev[1]:.0f}]s"
+            )
 
     def _flush_mutant_bucket(self) -> None:
         """Sum calls since the last flush per stage, refit the growth law,
@@ -127,6 +245,10 @@ class CostMonitorHook:
             self._tokens_by_stage.setdefault(stage, []).append(tokens)
             self._tokens_out_by_stage.setdefault(stage, []).append(stage_tokens_out[stage])
             self._latency_by_stage.setdefault(stage, []).append(stage_latency[stage])
+        for rec in new_calls:
+            bucket_pos = len(self._tokens_by_stage.get(rec.stage, [])) - 1
+            if bucket_pos >= 0:
+                self._call_bucket[rec.index] = (rec.stage, bucket_pos)
 
         new_stage_execs = self._stage_exec_history[self._nonllm_flush_idx:]
         self._nonllm_flush_idx = len(self._stage_exec_history)
@@ -154,12 +276,35 @@ class CostMonitorHook:
             stage: max(1, round(self._pred.max_mutants * len(series) / max(self._attempts, 1)))
             for stage, series in self._nonllm_duration_by_stage.items()
         })
+        fit_tokens = self._winsorised(self._tokens_by_stage)
+        fit_tokens_out = self._winsorised(self._tokens_out_by_stage)
+        fit_latency = self._winsorised(self._latency_by_stage)
+        fit_nonllm = self._winsorised(self._nonllm_duration_by_stage)
         est = estimate_by_stage(
             self._tokens_by_stage, self._latency_by_stage,
             total_units_by_stage=total_units_by_stage,
             max_in_flight=self._pred.max_in_flight,
             law_cls=RobustPowerLaw,
+            fit_tokens_by_stage=fit_tokens,
+            fit_latency_by_stage=fit_latency,
         )
+        # Apply the CostMonitorAgent's live overrides (Layer 4): golden_ratio
+        # is a safety margin, growth_rate_mult reacts to a sustained
+        # size/latency trend the agent detected. Sentinel -1 (out of range)
+        # means no change. These now scale the REMAINING work only — the
+        # elapsed part of the estimate is measured wall time, not a guess the
+        # agent has any business correcting.
+        tail_mult = 1.0
+        if 0.5 <= self._pred.llm_golden_override <= 2.0:
+            tail_mult *= self._pred.llm_golden_override
+        if 0.3 <= self._pred.llm_growth_override <= 3.0:
+            tail_mult *= self._pred.llm_growth_override
+        elapsed_s = self._clock() - self._t0
+        self._concurrency = achieved_concurrency(
+            self._call_times, now_s=elapsed_s, max_in_flight=self._pred.max_in_flight,
+        )
+        if 0.3 <= self._pred.llm_concurrency_override <= 3.0:
+            self._concurrency = max(0.5, self._concurrency * self._pred.llm_concurrency_override)
         # Duration uses the TTFT+TPOT physical model (latency ~ tokens_out),
         # not a growth law over call index — latency doesn't follow a growth
         # trend in this system (see estimate_duration_by_stage docstring).
@@ -168,19 +313,14 @@ class CostMonitorHook:
             total_units_by_stage=total_units_by_stage,
             max_in_flight=self._pred.max_in_flight,
             nonllm_duration_by_stage=self._nonllm_duration_by_stage,
+            elapsed_s=elapsed_s,
+            concurrency=self._concurrency,
+            tail_mult=tail_mult,
+            fit_tokens_out_by_stage=fit_tokens_out,
+            fit_latency_by_stage=fit_latency,
+            fit_nonllm_by_stage=fit_nonllm,
         )
-        # Apply the CostMonitorAgent's live overrides (Layer 4) to the
-        # growth-law duration estimate: golden_ratio is a safety margin,
-        # growth_rate_mult reacts to a sustained size/latency trend the
-        # agent detected. Sentinel -1 (out of range) means no change.
-        llm_mult = 1.0
-        if 0.5 <= self._pred.llm_golden_override <= 2.0:
-            llm_mult *= self._pred.llm_golden_override
-        if 0.3 <= self._pred.llm_growth_override <= 3.0:
-            llm_mult *= self._pred.llm_growth_override
-        if llm_mult != 1.0:
-            duration_s *= llm_mult
-            duration_ci = (duration_ci[0] * llm_mult, duration_ci[1] * llm_mult)
+        self._check_agent_trigger(duration_s)
         self._pred.predicted_total_tokens = int(est.predicted_total_tokens)
         self._pred.predicted_duration_s = duration_s
         self._pred.token_ci_low, self._pred.token_ci_high = (
@@ -201,14 +341,30 @@ class CostMonitorHook:
                 "predicted_duration_s": self._pred.predicted_duration_s,
                 "ci_low_s": self._pred.ci_low_s,
                 "ci_high_s": self._pred.ci_high_s,
+                "elapsed_s": elapsed_s,
+                "attempts": self._attempts,
+                "concurrency": self._concurrency,
+                "agent_due": self._agent_due,
             }),
         )
 
     async def __call__(self) -> None:
+        """Engine post_step_hook — fires when a mutant is ACCEPTED.
+
+        Kept as a second dispatch point so an accepted mutant can still pick
+        up a pending trigger promptly; the primary path is
+        ``_maybe_dispatch_agent`` off the attempt clock.
+        """
         self._counter += 1
         self._flush_mutant_bucket()
-        if self._counter % self._interval != 0:
-            return
+        if self._agent_due and self._agent is not None:
+            await self._run_agent()
+
+    async def _run_agent(self) -> None:
+        self._agent_due = False
+        self._agent_calls += 1
+        self._last_agent_attempt = self._attempts
+        trigger = self._trigger_reason
 
         # Build tool context from real live state, not fixed placeholders —
         # previously the agent always saw cold=0.57/golden=1.1/growth=1.0 and
@@ -217,6 +373,9 @@ class CostMonitorHook:
         current_golden = self._pred.llm_golden_override if self._pred.llm_golden_override > 0 else 1.0
         current_growth = self._pred.llm_growth_override if self._pred.llm_growth_override > 0 else 1.0
         current_cold = self._pred.llm_cold_override if self._pred.llm_cold_override > 0 else 0.57
+        current_conc_mult = (
+            self._pred.llm_concurrency_override if self._pred.llm_concurrency_override > 0 else 1.0
+        )
         if self._last_bp is not None:
             bp_util = self._last_bp.in_flight / self._last_bp.max_in_flight
             bp_in_flight, bp_max_in_flight = self._last_bp.in_flight, self._last_bp.max_in_flight
@@ -230,6 +389,14 @@ class CostMonitorHook:
             current_cold=current_cold,
             current_golden=current_golden,
             current_growth=current_growth,
+            achieved_concurrency=self._concurrency,
+            current_concurrency_mult=current_conc_mult,
+            elapsed_s=self._clock() - self._t0,
+            attempts_done=self._attempts,
+            max_mutants=self._pred.max_mutants,
+            predicted_duration_s=self._pred.predicted_duration_s,
+            trigger_reason=trigger,
+            last_adjustment=self._last_adjustment,
         )
         self._agent.tools = tools
 
@@ -246,7 +413,10 @@ class CostMonitorHook:
                 cold = adjustments.get("cold_start_factor", -1)
                 golden = adjustments.get("golden_ratio", -1)
                 growth = adjustments.get("growth_rate_mult", -1)
+                conc_mult = adjustments.get("concurrency_mult", -1)
                 reasoning = adjustments.get("reasoning", "")
+                outliers = adjustments.get("flag_outlier_indices", []) or []
+                self._flag_outliers(outliers)
 
                 if cold > 0:
                     self._pred.llm_cold_override = cold
@@ -254,22 +424,55 @@ class CostMonitorHook:
                     self._pred.llm_golden_override = _clamp_step(current_golden, golden)
                 if growth > 0:
                     self._pred.llm_growth_override = _clamp_step(current_growth, growth)
+                if conc_mult > 0:
+                    self._pred.llm_concurrency_override = _clamp_step(current_conc_mult, conc_mult)
                 if reasoning:
                     self._pred.llm_reasoning = reasoning
 
-                logger.info("[CostMonitorHook] adjustments: cold={} golden={} growth={} reason={}",
-                            cold, golden, growth, reasoning)
+                self._last_adjustment = {
+                    "attempt": self._attempts,
+                    "golden": golden, "growth": growth, "concurrency": conc_mult,
+                    "outliers": len(outliers),
+                    "reasoning": reasoning,
+                    "predicted_duration_s": self._pred.predicted_duration_s,
+                    "elapsed_s": self._clock() - self._t0,
+                }
+                logger.info(
+                    "[CostMonitorHook] adjustments: cold={} golden={} growth={} conc={} "
+                    "outliers={} trigger={!r} reason={}",
+                    cold, golden, growth, conc_mult, len(outliers), trigger, reasoning)
                 emit(CostAgentAdjustment(
                     mutant_index=self._counter,
                     cold_start_factor=cold,
                     golden_ratio=golden,
                     growth_rate_mult=growth,
+                    concurrency_mult=conc_mult,
                     flag_outlier_indices=adjustments.get("flag_outlier_indices", []),
                     skip_calibration=adjustments.get("skip_calibration", False),
                     reasoning=reasoning,
                 ))
         except Exception as e:
             logger.warning("[CostMonitorHook] agent call failed: {}", e)
+
+    def _flag_outliers(self, call_indices: list[int]) -> None:
+        """Turn the agent's flagged CALL indices into flagged bucket positions.
+
+        ``flag_outlier_indices`` used to be written to CostPrediction and the
+        COST_AGENT_ADJUSTMENT event and read by nobody — the same dead-code
+        shape the golden/growth overrides had. Now a flagged call winsorises
+        its bucket out of the growth-law fit (see :meth:`_winsorised`), which
+        is the surgical action a surprise-triggered agent actually needs: it
+        answers "transient spike" without touching the multipliers.
+        """
+        for idx in call_indices:
+            entry = self._call_bucket.get(idx)
+            if entry is None:
+                continue
+            stage, bucket_pos = entry
+            self._flagged_buckets.setdefault(stage, set()).add(bucket_pos)
+        if call_indices:
+            self._pred.llm_outlier_indices = sorted(
+                set(self._pred.llm_outlier_indices) | set(call_indices))
 
     def add_llm_call(self, tokens_in: int, tokens_out: int, latency_ms: float, stage: str) -> None:
         """Record an LLM call for the agent to analyse."""

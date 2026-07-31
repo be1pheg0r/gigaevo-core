@@ -29,6 +29,11 @@ _selected_model_var: ContextVar[str | None] = ContextVar("selected_model", defau
 _last_token_usage_var: ContextVar[TokenUsage | None] = ContextVar(
     "last_token_usage", default=None
 )
+# Accumulates across retries/fallbacks within one agent call — see
+# get_span_token_usage().
+_span_token_usage_var: ContextVar[TokenUsage | None] = ContextVar(
+    "span_token_usage", default=None
+)
 
 
 def get_selected_model() -> str | None:
@@ -50,10 +55,38 @@ def _remember_selected_model(model_name: str) -> None:
     _selected_model_var.set(model_name)
 
 
+def reset_token_usage_span() -> None:
+    """Start a new accounting span (called once per agent ``acall_llm``)."""
+    _span_token_usage_var.set(None)
+
+
+def get_span_token_usage() -> TokenUsage | None:
+    """Token usage summed over EVERY invocation since the last
+    :func:`reset_token_usage_span`, not just the most recent one.
+
+    One agent call can hit the model several times — structured-output
+    retries, model fallback. TokenTracker bills every one of them, but the
+    LLM_CALL event used to report only ``get_last_token_usage()``, so the
+    retries were invisible to the cost monitor. Measured on the 2026-07-31
+    logs: 23 of 174 events on toy_kadane were preceded by more than one
+    TokenTracker line, hiding 127,198 of 767,863 tokens — exactly the 17%
+    by which the final token prediction undershot.
+    """
+    return _span_token_usage_var.get()
+
+
 def _remember_token_usage(response: Any) -> None:
     usage = TokenUsage.from_response(response)
-    if usage is not None:
-        _last_token_usage_var.set(usage)
+    if usage is None:
+        return
+    _last_token_usage_var.set(usage)
+    prev = _span_token_usage_var.get()
+    _span_token_usage_var.set(usage if prev is None else TokenUsage(
+        context=prev.context + usage.context,
+        generated=prev.generated + usage.generated,
+        reasoning=prev.reasoning + usage.reasoning,
+        total=prev.total + usage.total,
+    ))
 
 
 def _create_langfuse_handler() -> CallbackHandler | None:

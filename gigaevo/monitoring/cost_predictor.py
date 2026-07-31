@@ -170,6 +170,11 @@ class CostPrediction:
     llm_cold_override: float = -1.0
     llm_golden_override: float = -1.0
     llm_growth_override: float = -1.0
+    # Multiplier on the MEASURED achieved LLM concurrency. The agent's only
+    # lever that acts on the divisor rather than on the work estimate — for
+    # server-load regime changes the trailing-window measurement has not
+    # caught up with yet.
+    llm_concurrency_override: float = -1.0
     llm_outlier_indices: list[int] = field(default_factory=list)
     llm_skip_next_calib: bool = False
     llm_reasoning: str = ""

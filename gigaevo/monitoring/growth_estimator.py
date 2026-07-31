@@ -211,6 +211,57 @@ def _bounded_integral(law, values: list[float], n: float) -> float:
     return min(raw, cap) if cap > 0 else raw
 
 
+def tail_integral(law, values: list[float], n: float,
+                  fit_values: list[float] | None = None) -> float:
+    """Extrapolate ONLY the unobserved tail (buckets ``len(values)``..``n``).
+
+    Two biases this removes, both measured on the 9 collected 100-mutant runs
+    (tools/cost_ablation, 2026-07-31):
+
+    1. *Re-predicting the past.* ``_bounded_integral`` fits a law to the
+       observed buckets and then integrates from zero, so the already-observed
+       part is replaced by the fit's own (lossy) reconstruction of it. On real
+       logs the final token estimate came out BELOW the sum the estimator had
+       already watched go by. Taking ``sum(values)`` as ground truth and
+       predicting only what is left makes the estimate monotonically
+       self-correcting and guarantees ``pred >= observed``.
+    2. *Retransformation bias.* PowerLaw/RobustPowerLaw fit in log space, so
+       exponentiating recovers the GEOMETRIC mean (Theil-Sen: the median);
+       what we extrapolate is a SUM, which needs the ARITHMETIC mean. For
+       right-skewed token/latency buckets the geometric mean sits well below
+       it — a systematic ~-20% undercount. Duan's smearing estimator fixes
+       this: rescale the law by the factor that makes it reproduce the
+       observed sum in-sample, then extrapolate with that scale.
+
+    Measured effect (median |error| of the final token estimate across the 9
+    runs): 22% -> 13%, and residual error then equals exactly the share of
+    tokens the LLM_CALL event stream misses, nothing else.
+
+    ``fit_values``: same-length series with outlier buckets replaced by the
+    median of the rest (see CostMonitorHook._winsorised). The tail is shaped
+    by ``fit_values`` — a transient spike must not be extrapolated over the
+    whole remaining run — while ``values`` still anchors the already-observed
+    part, because the outlier's cost was genuinely incurred.
+    """
+    k = len(values)
+    if k == 0 or n <= k:
+        return 0.0
+    fv = fit_values if fit_values and len(fit_values) == k else values
+    scale = 1.0
+    if k >= 2:
+        in_sample = law.integral(k)
+        if in_sample > 0:
+            scale = min(max(sum(fv) / in_sample, 0.2), 5.0)  # Duan smearing
+    tail = (law.integral(n) - law.integral(k)) * scale
+    flat = (sum(fv) / k) * (n - k)  # no-growth backstop, see _bounded_integral
+    # Cap the tail at a multiple of the flat projection, tightened while
+    # evidence is thin: a power law fitted on ~10 buckets and extrapolated to
+    # 100 can multiply by (100/10)^2 on nothing but noise. Relaxes back to the
+    # old generous 8x ceiling once enough buckets support the trend.
+    cap_mult = 1.5 + 6.5 * k / (k + 20)
+    return min(max(tail, 0.0), flat * cap_mult)
+
+
 def confidence_width(n_points: int) -> float:
     """Relative half-width of the prediction interval. Shrinks as evidence
     accumulates; wide by default so a 1-2 point fit doesn't claim precision
@@ -268,6 +319,8 @@ def estimate_by_stage(
     total_units_by_stage: dict[str, int],
     max_in_flight: int,
     law_cls: type = LinearLaw,
+    fit_tokens_by_stage: dict[str, list[float]] | None = None,
+    fit_latency_by_stage: dict[str, list[float]] | None = None,
 ) -> GrowthEstimate:
     """Same as :func:`estimate`, but fits one growth law per call stage
     (e.g. ``MutationSuggestionAgent`` vs ``MutationAgent``) instead of one
@@ -291,11 +344,15 @@ def estimate_by_stage(
     for stage, tokens in tokens_by_stage.items():
         latency = latency_by_stage.get(stage, [])
         n = total_units_by_stage.get(stage, len(tokens))
+        # Outlier-suppressed copies shape the extrapolation; the raw series
+        # still anchors the observed part. See :func:`tail_integral`.
+        fit_tok = (fit_tokens_by_stage or {}).get(stage, tokens)
+        fit_lat = (fit_latency_by_stage or {}).get(stage, latency)
 
-        tok_law = law_cls.fit(tokens)
-        lat_law = law_cls.fit(latency)
-        tok_total = _bounded_integral(tok_law, tokens, n)
-        lat_total_s = _bounded_integral(lat_law, latency, n) / 1000.0
+        tok_law = law_cls.fit(fit_tok)
+        lat_law = law_cls.fit(fit_lat)
+        tok_total = sum(tokens) + tail_integral(tok_law, tokens, n, fit_tok)
+        lat_total_s = (sum(latency) + tail_integral(lat_law, latency, n, fit_lat)) / 1000.0
         w_tok = confidence_width(tok_law.n_points)
         w_lat = confidence_width(lat_law.n_points)
 
@@ -317,6 +374,52 @@ def estimate_by_stage(
     )
 
 
+def achieved_concurrency(
+    calls: list[tuple[float, float]],
+    *,
+    now_s: float,
+    max_in_flight: int,
+    window_frac: float = 0.5,
+    min_window_s: float = 300.0,
+    shrink_k: int = 80,
+) -> float:
+    """How many LLM calls the system is ACTUALLY running at once, measured as
+    service-time-per-wall-second over a trailing window.
+
+    ``max_in_flight`` is the DAG's mutant-dispatch cap, not the LLM
+    concurrency: one mutant DAG issues several LLM calls that overlap, and
+    conversely a low-accept-rate or slow-validator task never fills the pool.
+    Measured on the 9 collected runs the true value ranged from 4.2 to 14.5
+    against a constant ``max_in_flight=8`` — and Little's Law divided by 8
+    reproduced the whole observed duration-error spread (-47%..+80%) on its
+    own. Nothing else in the duration model was materially wrong.
+
+    Measured over a trailing window rather than from t0, because the run ramps
+    up and a cumulative average never lives that cold start down. Shrunk
+    toward ``max_in_flight`` while call evidence is thin, so the first few
+    calls (when the ramp reads as near-zero concurrency) can't blow the
+    estimate up. ``shrink_k`` / ``min_window_s`` were swept on those 9 runs;
+    80 / 300s minimised error at 25% and 50% progress without hurting the
+    final estimate.
+
+    ``calls``: ``(completion_time_s, latency_ms)`` for every call so far.
+    """
+    if not calls:
+        return float(max_in_flight)
+    t_first = min(ts - lat / 1000.0 for ts, lat in calls)
+    if now_s - t_first <= 1.0:
+        return float(max_in_flight)
+    w_start = max(t_first, now_s - max(min_window_s, (now_s - t_first) * window_frac))
+    service_s = sum(lat for ts, lat in calls if ts > w_start) / 1000.0
+    span_s = now_s - w_start
+    if span_s <= 1.0 or service_s <= 0:
+        return float(max_in_flight)
+    n = len(calls)
+    w = n / (n + shrink_k)
+    blended = w * (service_s / span_s) + (1 - w) * max_in_flight
+    return min(max(blended, 0.5), 64.0)
+
+
 def estimate_duration_by_stage(
     tokens_out_by_stage: dict[str, list[float]],
     latency_by_stage: dict[str, list[float]],
@@ -326,6 +429,12 @@ def estimate_duration_by_stage(
     token_law_cls: type = RobustPowerLaw,
     nonllm_duration_by_stage: dict[str, list[float]] | None = None,
     nonllm_law_cls: type = RobustPowerLaw,
+    elapsed_s: float = 0.0,
+    concurrency: float | None = None,
+    tail_mult: float = 1.0,
+    fit_tokens_out_by_stage: dict[str, list[float]] | None = None,
+    fit_latency_by_stage: dict[str, list[float]] | None = None,
+    fit_nonllm_by_stage: dict[str, list[float]] | None = None,
 ) -> tuple[float, tuple[float, float]]:
     """Predict total wall-clock duration via the TTFT+TPOT physical model
     (:func:`fit_ttft_tpot`) per stage instead of fitting latency itself as
@@ -343,29 +452,49 @@ def estimate_duration_by_stage(
     concept applies to a validator/executor stage) and folded into the same
     Little's Law division as the LLM contribution below, not a second one.
 
+    ``elapsed_s`` / ``concurrency``: the estimate is ANCHORED — wall time
+    already spent is known exactly, so only the REMAINING service time is
+    predicted, and it is divided by the concurrency the system is actually
+    achieving (see :func:`achieved_concurrency`) rather than by the
+    ``max_in_flight`` dispatch cap. ``concurrency=None`` falls back to
+    ``max_in_flight`` (old behaviour).
+
+    ``tail_mult``: CostMonitorAgent's calibration multiplier. Applied to the
+    remaining-work term only — scaling the elapsed term too would let the
+    agent "correct" wall time that has already been measured.
+
     Returns ``(duration_s, (ci_low_s, ci_high_s))``.
     """
-    total_latency_ms = 0.0
+    remaining_ms = 0.0
     n_points = 0
 
     for stage, tokens_out in tokens_out_by_stage.items():
         latency = latency_by_stage.get(stage, [])
         n = total_units_by_stage.get(stage, len(tokens_out))
+        k = len(tokens_out)
+        n_points += k
+        if n <= k:
+            continue
 
-        ttft, tpot = fit_ttft_tpot(tokens_out, latency)
-        tok_law = token_law_cls.fit(tokens_out)
-        tok_out_total = _bounded_integral(tok_law, tokens_out, n)
-        mean_tok_out = tok_out_total / max(n, 1)
-
-        total_latency_ms += (ttft + tpot * mean_tok_out) * n
-        n_points += len(tokens_out)
+        fit_out = (fit_tokens_out_by_stage or {}).get(stage, tokens_out)
+        fit_lat = (fit_latency_by_stage or {}).get(stage, latency)
+        ttft, tpot = fit_ttft_tpot(fit_out, fit_lat)
+        # OLS is unconstrained and a noisy fit can hand back a negative
+        # intercept or slope, which turned into negative predicted durations
+        # on real logs. Both are physically non-negative.
+        ttft, tpot = max(ttft, 0.0), max(tpot, 0.0)
+        tail_out = tail_integral(token_law_cls.fit(fit_out), tokens_out, n, fit_out)
+        remaining_ms += ttft * (n - k) + tpot * tail_out
 
     for stage, durations in (nonllm_duration_by_stage or {}).items():
         n = total_units_by_stage.get(stage, len(durations))
-        law = nonllm_law_cls.fit(durations)
-        total_latency_ms += _bounded_integral(law, durations, n)
+        fit_dur = (fit_nonllm_by_stage or {}).get(stage, durations)
+        remaining_ms += tail_integral(nonllm_law_cls.fit(fit_dur), durations, n, fit_dur)
         n_points += len(durations)
 
-    duration_s = max(0.0, total_latency_ms / 1000.0 / max(max_in_flight, 1))
+    conc = concurrency if concurrency and concurrency > 0 else max(max_in_flight, 1)
+    duration_s = max(0.0, elapsed_s + remaining_ms * tail_mult / 1000.0 / conc)
     w = confidence_width(n_points)
-    return duration_s, (duration_s * (1 - w), duration_s * (1 + w))
+    # Only the predicted part carries uncertainty; elapsed time is measured.
+    half = (duration_s - elapsed_s) * w
+    return duration_s, (duration_s - half, duration_s + half)

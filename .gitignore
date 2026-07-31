@@ -175,6 +175,7 @@ tmp/
 *.jpg
 *.jpeg
 *.svg
+*.tex
 
 # Keep UI/demo SVGs checked in
 !demos/**/*.svg
