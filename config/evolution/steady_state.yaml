@@ -23,8 +23,9 @@ evolution_engine:
   strategy: ${evolution_strategy}
   mutation_operator: ${mutation_operator}
   config: ${engine_config}
-  writer: ${writer}
-  metrics_tracker: ${metrics_tracker}
-  pre_step_hook: ${pre_step_hook}
-  post_run_hook: ${ideas_tracker}
-  post_step_hook: ${post_step_hook}
+  # `${ref:x}` for stateful nodes — see the note in evolution/default.yaml.
+  writer: ${ref:writer}
+  metrics_tracker: ${ref:metrics_tracker}
+  pre_step_hook: ${ref:pre_step_hook}
+  post_run_hook: ${ref:ideas_tracker}
+  post_step_hook: ${ref:post_step_hook}
