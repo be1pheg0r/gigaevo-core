@@ -804,9 +804,8 @@ function headline(paired, tasks) {
     x1: f.pad.l, x2: w - f.pad.r, y1: Y(0), y2: Y(0),
     stroke: "var(--ink)", "stroke-width": 1.5, opacity: 0.5,
   }));
-  const zt = svgEl("text", { class: "tick", x: w - f.pad.r - 2, y: Y(0) - 6, "text-anchor": "end" });
-  zt.textContent = "0 — прогноз совпал";
-  f.svg.appendChild(zt);
+  // no "0" caption here: the y axis already ticks it, and the caption sat in
+  // the gutter where the curves put their own direct labels
   for (const [v, txt] of [[d1, "выше нуля: переоценка"], [d0, "ниже нуля: недооценка"]]) {
     const t = svgEl("text", { class: "axhint", x: f.pad.l + 6,
                                y: v > 0 ? f.pad.t + 12 : h - f.pad.b - 6 });
