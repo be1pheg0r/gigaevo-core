@@ -16,6 +16,7 @@ const S = {
   taskFilter: "__all__",   // "__all__" or a task key
   picked: new Set(),
   timer: null,
+  launchTimer: null,
 };
 
 const GRID = Array.from({ length: 20 }, (_, i) => (i + 1) * 5);       // 5%…100%
@@ -326,14 +327,38 @@ async function launch() {
     });
     $("#launch-note").textContent = res.cmd;
     toast(`Запущено: ${res.name}`);
-    await loadExperiments();
-    select(res.name);
+    // Switch to the live view FIRST, so the driver panel is on screen while
+    // the launcher is still picking redis dbs — the wait is the part that
+    // used to look like nothing happening.
+    S.selected = res.name;
     goto("live");
+    await select(res.name);
+    await loadExperiments();
+    watchLaunch(res.name);
   } catch (e) {
     toast(`Не удалось запустить: ${e.message}`, true);
   }
   btn.textContent = "Запустить эксперимент";
   renderLedger();
+}
+
+/** Poll hard for the first two minutes of a launch, then hand back to the
+ *  normal 6s tick. Also reports a driver that died, once. */
+function watchLaunch(name) {
+  clearInterval(S.launchTimer);
+  const until = Date.now() + 120000;
+  let warned = false;
+  S.launchTimer = setInterval(async () => {
+    if (S.selected !== name || Date.now() > until) return clearInterval(S.launchTimer);
+    await loadDetail();
+    const drv = S.detail?.driver;
+    if (drv?.failed && !warned) {
+      warned = true;
+      toast(`Запуск упал (код ${drv.returncode}) — смотрите вывод драйвера`, true);
+      clearInterval(S.launchTimer);
+    }
+    if (S.detail?.runs?.length) clearInterval(S.launchTimer);
+  }, 2000);
 }
 
 /* ────────────────────────────────────────────────────── rail ── */
@@ -352,8 +377,10 @@ function renderExperiments() {
     b.append(el("div", "exp__name", e.name));
     const meta = el("div", "exp__meta");
     if (e.running > 0 || e.launching) meta.append(el("span", "pulse"));
+    if (e.failed) meta.append(el("span", "chip chip--warn", "запуск упал"));
     meta.append(el("span", null,
-      `готово ${e.done}/${e.n_runs} · задач ${e.tasks.length} · ${ago(e.created)}`));
+      e.n_runs === 0 && e.launching ? `запускается · ${ago(e.created)}`
+        : `готово ${e.done}/${e.n_runs} · задач ${e.tasks.length} · ${ago(e.created)}`));
     b.append(meta);
     b.onclick = () => { select(e.name); goto(e.running > 0 ? "live" : "analyze"); };
     li.append(b);
@@ -401,6 +428,37 @@ function ribbon(run) {
   return f.svg;
 }
 
+/** What the launcher itself is doing.
+ *
+ *  The driver spends its first minute scanning 128 redis dbs and staggering
+ *  launches, so between the click and the first run's log there used to be
+ *  nothing on screen at all — which read as "the button did nothing". This
+ *  panel shows the driver's own output until the runs take over, and stays
+ *  if it died so the reason is visible instead of silence. */
+function driverPanel(drv, nRuns) {
+  if (!drv || !drv.known) return null;
+  if (!drv.alive && !drv.failed && nRuns > 0) return null;   // launcher done, runs speak for themselves
+
+  const p = el("div", `driver${drv.failed ? " driver--bad" : ""}`);
+  const head = el("div", "driver__head");
+  if (drv.alive) head.append(el("span", "pulse"));
+  head.append(el("b", null,
+    drv.failed ? `Запуск упал (код ${drv.returncode})`
+      : drv.stopped ? "Остановлено вручную"
+      : drv.alive ? (nRuns ? "Запускаю остальные прогоны…" : "Запускаю: ищу свободные базы redis…")
+      : "Запускающий процесс завершился"));
+  if (drv.alive && !nRuns) {
+    head.append(el("span", "driver__hint",
+      "первый прогон появится, как только драйвер выберет базу и стартует run.py"));
+  }
+  p.append(head);
+
+  const pre = el("pre", "driver__log");
+  pre.textContent = (drv.log_lines || []).slice(-14).join("\n") || "(драйвер пока ничего не написал)";
+  p.append(pre);
+  return p;
+}
+
 function renderLive() {
   const d = S.detail;
   $("#live-eyebrow").textContent = d ? d.name : "Эксперимент не выбран";
@@ -408,6 +466,12 @@ function renderLive() {
   const box = $("#runs");
   box.textContent = "";
   if (!d) { box.append(el("p", "empty", "Выберите эксперимент слева или запустите новый.")); return; }
+
+  const panel = driverPanel(d.driver, d.runs.length);
+  if (panel) box.append(panel);
+  if (!d.runs.length && !panel) {
+    box.append(el("p", "empty", "У этого эксперимента ещё нет ни одного прогона."));
+  }
 
   for (const run of d.runs) {
     const m = METRIC[S.metric];
@@ -631,19 +695,40 @@ function renderAnalyze() {
 
   box.append(headline(paired, tasks));
   box.append(checkpointTable(paired));
-  box.append(agentBlock(d.runs));
+  box.append(harnessBlock(d.runs));
+  box.append(observerBlock(d.runs));
+  box.append(stabilityBlock(done));
   box.append(decisionsBlock(d.runs));
   box.append(smallMultiples(paired));
   box.append(finalTable(tasks));
 }
 
-function condSeries(paired, cond) {
-  // median and IQR of |error| across tasks, at every 5% checkpoint
+/** Median and IQR across tasks at every 5% checkpoint.
+ *
+ *  `signed` keeps the sign, so the chart can show WHICH WAY the forecast is
+ *  wrong — a model that overshoots by 30% and one that undershoots by 30%
+ *  are the same point once you take the modulus, and they are not the same
+ *  failure. The checkpoint table stays on the modulus: there "lower is
+ *  better" has to hold for the delta row to mean anything. */
+function condSeries(paired, cond, signed = false) {
   return GRID.map((p) => {
     const vals = paired.map(([, c]) => errAt(c[cond], p, S.metric))
-                       .filter((v) => v != null).map(Math.abs);
+                       .filter((v) => v != null).map((v) => (signed ? v : Math.abs(v)));
     return { p, med: median(vals), q1: quantile(vals, 0.25), q3: quantile(vals, 0.75), n: vals.length };
   });
+}
+
+/** Ticks covering [d0,d1] that always include 0, so a signed axis reads
+ *  against a baseline rather than against whatever the data happened to hit. */
+function signedTicks(d0, d1) {
+  const span = d1 - d0;
+  const raw = span / 6;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw || 1)));
+  const step = [1, 2, 2.5, 5, 10].map((s) => s * mag).find((s) => s >= raw) || mag * 10;
+  const out = [];
+  for (let t = Math.ceil(d0 / step) * step; t <= d1 + 1e-9; t += step) out.push(Math.round(t * 10) / 10);
+  if (!out.includes(0) && d0 <= 0 && d1 >= 0) out.push(0);
+  return out.sort((a, b) => a - b);
 }
 
 /** The chart shows either the median across every paired task, or one task on
@@ -676,8 +761,8 @@ function headline(paired, tasks) {
   head.append(el("p", null,
     paired.length
       ? (S.taskFilter === "__all__"
-          ? `Медиана модуля ошибки по ${METRIC[S.metric].label} на ${paired.length} парных задачах, замер на каждых 5% прогресса. Заливка — межквартильный размах: насколько задачи расходятся между собой.`
-          : `Задача ${S.taskFilter}, модуль ошибки по ${METRIC[S.metric].label} на каждых 5% прогресса. Флажки — вмешательства агента.`)
+          ? `Медиана ошибки по ${METRIC[S.metric].label} со знаком на ${paired.length} парных задачах, замер на каждых 5% прогресса. Выше нуля — прогноз завышен, ниже — занижен; модуль этого не показывает. Заливка — межквартильный размах.`
+          : `Задача ${S.taskFilter}, ошибка по ${METRIC[S.metric].label} со знаком на каждых 5% прогресса. Флажки — вмешательства агента.`)
       : "Ни у одной задачи не готовы оба условия, пары строить не из чего."));
   block.append(head);
 
@@ -688,15 +773,46 @@ function headline(paired, tasks) {
 
   const scoped = S.taskFilter === "__all__" ? paired : paired.filter(([k]) => k === S.taskFilter);
   block.append(taskFilterBar(paired, renderAnalyze));
-  const A = condSeries(scoped, "noagent"), B = condSeries(scoped, "withagent");
-  const w = 980, h = 380, f = chartFrame(w, h, { l: 54, r: 158, t: 30, b: 40 });
-  const all = [...A, ...B].flatMap((d) => [d.q3, d.med]).filter((v) => v != null);
-  const top = Math.max(20, Math.ceil(Math.max(...all) / 10) * 10);
-  const ticks = Array.from({ length: 6 }, (_, i) => Math.round((top / 5) * i));
-  yAxis(f, 0, top, ticks, `модуль ошибки по ${METRIC[S.metric].label}, %`);
+  const A = condSeries(scoped, "noagent", true), B = condSeries(scoped, "withagent", true);
+  const w = 980, h = 400, f = chartFrame(w, h, { l: 62, r: 158, t: 30, b: 40 });
+
+  // Signed domain, always straddling zero: above the line the forecast is too
+  // expensive, below it too cheap. Clamped at ±400% so one cold-start spike
+  // (confidence_width(n=1) is 100% by design) cannot flatten the whole chart.
+  const CLAMP = 400;
+  const all = [...A, ...B].flatMap((d) => [d.q1, d.med, d.q3])
+                          .filter((v) => v != null).map((v) => Math.max(-CLAMP, Math.min(CLAMP, v)));
+  let d0 = Math.min(0, ...all), d1 = Math.max(0, ...all);
+  const padv = Math.max(5, (d1 - d0) * 0.08);
+  d0 -= padv; d1 += padv;
+  const ticks = signedTicks(d0, d1);
+  yAxis(f, d0, d1, ticks, `ошибка по ${METRIC[S.metric].label} со знаком, %`);
   xAxis(f, 5, 100, [5, 10, 15, 25, 50, 75, 100], "%");
 
-  const X = (p) => f.x(p, 5, 100), Y = (v) => f.y(Math.min(v, top), 0, top);
+  const X = (p) => f.x(p, 5, 100);
+  const Y = (v) => f.y(Math.max(d0, Math.min(d1, v)), d0, d1);
+
+  // the ±10% corridor, then the zero line on top of it
+  if (d0 < 10 && d1 > -10) {
+    f.svg.appendChild(svgEl("rect", {
+      x: f.pad.l, width: w - f.pad.l - f.pad.r,
+      y: Y(Math.min(10, d1)), height: Math.abs(Y(Math.max(-10, d0)) - Y(Math.min(10, d1))),
+      fill: "var(--good)", opacity: 0.09,
+    }));
+  }
+  f.svg.appendChild(svgEl("line", {
+    x1: f.pad.l, x2: w - f.pad.r, y1: Y(0), y2: Y(0),
+    stroke: "var(--ink)", "stroke-width": 1.5, opacity: 0.5,
+  }));
+  const zt = svgEl("text", { class: "tick", x: w - f.pad.r - 2, y: Y(0) - 6, "text-anchor": "end" });
+  zt.textContent = "0 — прогноз совпал";
+  f.svg.appendChild(zt);
+  for (const [v, txt] of [[d1, "выше нуля: переоценка"], [d0, "ниже нуля: недооценка"]]) {
+    const t = svgEl("text", { class: "axhint", x: f.pad.l + 6,
+                               y: v > 0 ? f.pad.t + 12 : h - f.pad.b - 6 });
+    t.textContent = txt;
+    f.svg.appendChild(t);
+  }
 
   const placed = [];  // y positions already used by a direct label
   for (const [data, color, name, dash] of [
@@ -716,7 +832,8 @@ function headline(paired, tasks) {
     pts.forEach((d) => {
       const c = svgEl("circle", { cx: X(d.p), cy: Y(d.med), r: 4.5, fill: color,
                                   stroke: "var(--surface)", "stroke-width": 2 });
-      bindTip(c, `<b>${d.p}% прогона</b><br>${name}<br>медиана ошибки <em>${d.med.toFixed(1)}%</em><br>IQR ${d.q1.toFixed(1)}–${d.q3.toFixed(1)}% · задач ${d.n}`);
+      bindTip(c, `<b>${d.p}% прогона</b><br>${name}<br>медиана ошибки <em>${pct(d.med)}</em> ` +
+                 `(${d.med > 0 ? "переоценка" : "недооценка"})<br>IQR ${pct(d.q1)}…${pct(d.q3)} · задач ${d.n}`);
       f.svg.appendChild(c);
     });
 
@@ -757,15 +874,13 @@ function headline(paired, tasks) {
     }
   }
 
-  // the 10% band every forecast is trying to get inside
-  const y10 = Y(10);
-  if (y10 > f.pad.t) {
-    f.svg.appendChild(svgEl("line", { x1: f.pad.l, x2: w - f.pad.r, y1: y10, y2: y10,
-                                       stroke: "var(--ink-3)", "stroke-width": 1, "stroke-dasharray": "2 4" }));
-    const t = svgEl("text", { class: "tick", x: w - f.pad.r - 2, y: y10 - 6, "text-anchor": "end" });
-    t.textContent = "10% — годная оценка";
-    f.svg.appendChild(t);
-  }
+  const legend = el("div", "legend");
+  legend.innerHTML =
+    `<span style="color:var(--auto)"><i class="swatch swatch--dash"></i>автомат</span>` +
+    `<span><i class="swatch" style="background:var(--agent)"></i>автомат + агент</span>` +
+    `<span><i class="swatch" style="background:var(--wake)"></i>вмешательство агента</span>` +
+    `<span><i class="swatch" style="background:var(--good);opacity:.45"></i>коридор ±10%</span>`;
+  block.append(legend);
 
   const wrap = el("div", "chartwrap");
   wrap.append(f.svg);
@@ -849,65 +964,246 @@ function checkpointTable(paired) {
   return block;
 }
 
-function agentBlock(runs) {
+/* ──────────────────────── эффективность харнесса агента ── */
+
+/** Observability tools whose output the agent is TOLD it has, but which
+ *  `CostMonitorAgent.build_prompt` does not actually inline into the prompt.
+ *  The trace logs all six (`_log_agent_trace` calls them itself), so the
+ *  console would otherwise present evidence the model never saw. */
+const TOOLS_IN_PROMPT = new Set(["get_recent_calls", "get_backpressure", "get_model_params", "get_program_diff"]);
+
+/** Signed error at the checkpoint nearest this wakeup, and `lookahead`
+ *  further on — the crude before/after any single intervention gets. */
+function wakeupImpact(run, ev, lookahead = 20) {
+  const total = run.attempts || 1;
+  const prog = Math.min(100, Math.max(5, (ev.attempt / total) * 100));
+  const snap = GRID.reduce((a, b) => (Math.abs(b - prog) < Math.abs(a - prog) ? b : a), 5);
+  const before = errAt(run, snap, S.metric);
+  const after = errAt(run, Math.min(100, snap + lookahead), S.metric);
+  if (before == null || after == null) return null;
+  return { snap, before, after, delta: Math.abs(after) - Math.abs(before) };
+}
+
+/** Every wakeup in the experiment, flattened, with its impact attached. */
+function harnessRows(runs) {
+  const out = [];
+  for (const run of runs) {
+    if (run.condition !== "withagent") continue;
+    for (const ev of run.agent_events) {
+      out.push({ run, ev: { ...ev, run_stem: run.stem }, impact: wakeupImpact(run, ev) });
+    }
+  }
+  return out;
+}
+
+function harnessBlock(runs) {
   const block = el("div", "block");
   const head = el("div", "block__head");
-  head.append(el("h3", null, "Что именно делал агент"));
+  head.append(el("h3", null, "Эффективность харнесса агента"));
   head.append(el("p", null,
-    "Каждое пробуждение на оси попыток самого прогона. Жирная насечка — сдвинул хотя бы один рычаг, тонкая — посмотрел и отказался. Наведите, чтобы увидеть триггер и обоснование."));
+    "Чем агент пользовался и что это дало. Дельта — изменение модуля ошибки от чекпоинта, "
+    + "ближайшего к пробуждению, до чекпоинта на 20% дальше. Отрицательная дельта значит, что "
+    + "после вызова ошибка стала меньше. Это корреляция на одном прогоне, а не доказательство "
+    + "причины — рядом с каждой цифрой стоит число наблюдений."));
   block.append(head);
 
-  const withAgent = runs.filter((r) => r.condition === "withagent");
-  if (!withAgent.some((r) => r.agent_events.length)) {
+  const rows = harnessRows(runs);
+  if (!rows.length) {
     block.append(el("p", "empty", "Пробуждений пока не записано."));
     return block;
   }
 
+  block.append(harnessSummary(rows));
+  block.append(toolTable(rows));
+  block.append(impactStrip(rows));
+  return block;
+}
+
+function harnessSummary(rows) {
+  const acted = rows.filter(({ ev }) => ev.moved.length || ev.outliers || ev.skip_calibration);
+  const withImpact = rows.filter((r) => r.impact);
+  const helped = withImpact.filter((r) => r.impact.delta < 0);
+  // Two wakeups naming the same surprise are that surprise handled twice —
+  // the hook can dispatch the agent concurrently from the attempt path and
+  // the accept path, and both copies then act on overlapping evidence.
+  // Keyed on the event, not the whole string: two dispatches of one breach
+  // quote estimates seconds apart ("2402s" vs "2407s") and would otherwise
+  // look like different triggers.
+  const seen = new Map();
+  for (const { ev } of rows) {
+    const k = `${ev.run_stem}|${(ev.trigger || "").replace(/:.*$/, "").trim()}`;
+    seen.set(k, (seen.get(k) || 0) + 1);
+  }
+  const dup = [...seen.values()].filter((n) => n > 1).reduce((a, n) => a + n - 1, 0);
+
+  const wrap = el("div", "scorecard");
+  const card = (k, v, sub, cls) => {
+    const c = el("div", "score");
+    c.append(el("div", "score__k", k));
+    const val = el("div", `score__v${cls ? " " + cls : ""}`, v);
+    c.append(val);
+    if (sub) c.append(el("div", "score__s", sub));
+    return c;
+  };
+  wrap.append(card("пробуждений", String(rows.length),
+                   `на ${new Set(rows.map((r) => r.run.stem)).size} прогонах`));
+  wrap.append(card("с действием", `${acted.length}`,
+                   `${Math.round((acted.length / rows.length) * 100)}% — остальные посмотрели и отказались`));
+  const medD = median(withImpact.map((r) => r.impact.delta));
+  wrap.append(card("медиана дельты", medD == null ? "—" : pct(medD),
+                   `по ${withImpact.length} пробуждениям с измеримым эффектом`,
+                   medD == null ? "" : medD < 0 ? "win" : "loss"));
+  wrap.append(card("помогли", withImpact.length ? `${helped.length}/${withImpact.length}` : "—",
+                   "ошибка снизилась после вызова"));
+  wrap.append(card("повторных триггеров", String(dup),
+                   dup ? "одно и то же событие обработано дважды" : "дубликатов нет",
+                   dup ? "loss" : "win"));
+  return wrap;
+}
+
+/** Per-tool scorecard: how often it fired and what happened to the error.
+ *  Observability tools are counted from the recorded evidence, action tools
+ *  from what the agent actually invoked. */
+function toolTable(rows) {
+  const stat = new Map();
+  const bump = (name, kind, r) => {
+    if (!stat.has(name)) stat.set(name, { name, kind, n: 0, deltas: [] });
+    const s = stat.get(name);
+    s.n += 1;
+    if (r.impact) s.deltas.push(r.impact.delta);
+  };
+  for (const r of rows) {
+    for (const k of Object.keys(r.ev.evidence || {})) bump(k, "obs", r);
+    const acts = r.ev.actions && r.ev.actions.length
+      ? r.ev.actions
+      : [...(r.ev.moved.length ? ["adjust_model"] : []),
+         ...(r.ev.outliers ? ["flag_as_outlier"] : []),
+         ...(r.ev.skip_calibration ? ["skip_next_calibration"] : [])];
+    for (const a of acts) bump(a, "act", r);
+    for (const k of r.ev.moved) bump(`рычаг ${LEVER_RU[k] || k}`, "lever", r);
+  }
+
+  const list = [...stat.values()].sort((a, b) =>
+    a.kind === b.kind ? b.n - a.n : ["act", "lever", "obs"].indexOf(a.kind) - ["act", "lever", "obs"].indexOf(b.kind));
+  const maxN = Math.max(...list.map((s) => s.n), 1);
+
+  const t = el("table", "grid-table tooltable");
+  t.innerHTML = "<thead><tr><th>Инструмент</th><th>Тип</th><th>Вызовов</th>"
+    + "<th>Медиана дельты</th><th>Помогло</th><th>Доехало до модели</th></tr></thead>";
+  const tb = el("tbody");
+  const KIND = { obs: "наблюдение", act: "действие", lever: "рычаг" };
+  for (const s of list) {
+    const tr = el("tr");
+    const nameCell = el("td");
+    nameCell.append(el("span", "tool__n", TOOL_RU[s.name]?.split(" — ")[0] || ACTION_RU[s.name] || s.name));
+    const hint = TOOL_RU[s.name]?.split(" — ")[1];
+    if (hint) nameCell.append(el("span", "tool__h", hint));
+    tr.append(nameCell);
+    tr.append(el("td", null, KIND[s.kind]));
+
+    const bar = el("td", "cell--bar");
+    const fill = el("span", "bar__f");
+    fill.style.width = `${(s.n / maxN) * 100}%`;
+    bar.append(fill, el("span", "bar__n", String(s.n)));
+    tr.append(bar);
+
+    // Attribution only for things the agent CHOSE. Every wakeup reads every
+    // observability tool, so their per-tool delta is just the overall delta
+    // repeated once per row — a number that looks like evidence and isn't.
+    if (s.kind === "obs") {
+      const na = el("td", "cell--na", "не приписывается");
+      na.title = "Инструмент наблюдения читается на каждом пробуждении, "
+        + "поэтому его «эффект» — это просто общая дельта, повторённая в каждой строке.";
+      na.colSpan = 2;
+      tr.append(na);
+    } else {
+      const med = median(s.deltas);
+      const dc = el("td", null, med == null ? "—" : pct(med));
+      if (med != null) dc.classList.add(med < 0 ? "win" : "loss");
+      tr.append(dc);
+      const good = s.deltas.filter((d) => d < 0).length;
+      tr.append(el("td", null, s.deltas.length ? `${good}/${s.deltas.length}` : "—"));
+    }
+
+    const reach = el("td");
+    if (s.kind !== "obs") reach.textContent = "—";
+    else if (TOOLS_IN_PROMPT.has(s.name)) reach.append(el("span", "flag flag--ok", "да"));
+    else {
+      const bad = el("span", "flag flag--bad", "нет");
+      bad.title = "Инструмент пишется в трейс, но build_prompt не вкладывает его вывод "
+        + "в промпт — агент этих данных не видел, хотя системный промпт на них ссылается.";
+      reach.append(bad);
+    }
+    tr.append(reach);
+    tb.append(tr);
+  }
+  t.append(tb);
+
+  const wrap = el("div");
+  wrap.append(t);
+  const miss = list.filter((s) => s.kind === "obs" && !TOOLS_IN_PROMPT.has(s.name));
+  if (miss.length) {
+    wrap.append(el("p", "note",
+      `Внимание: ${miss.length} инструмент(ов) наблюдения записаны в трейс, но не попадают в промпт `
+      + `(${miss.map((s) => s.name).join(", ")}). Агент принимал решение без них.`));
+  }
+  return wrap;
+}
+
+/** Every wakeup as one signed bar: error before vs after. The one view that
+ *  shows a lever that fired and made things worse. */
+function impactStrip(rows) {
+  const pts = rows.filter((r) => r.impact);
+  if (!pts.length) return el("p", "empty", "Ни у одного пробуждения нет точек до и после.");
+
+  const w = 980, h = 220, f = chartFrame(w, h, { l: 62, r: 20, t: 26, b: 46 });
+  const vals = pts.map((r) => r.impact.delta);
+  let d0 = Math.min(0, ...vals), d1 = Math.max(0, ...vals);
+  const padv = Math.max(3, (d1 - d0) * 0.1);
+  d0 -= padv; d1 += padv;
+  yAxis(f, d0, d1, signedTicks(d0, d1), "изменение модуля ошибки после вызова, п.п.");
+  const Y = (v) => f.y(Math.max(d0, Math.min(d1, v)), d0, d1);
+  f.svg.appendChild(svgEl("line", { x1: f.pad.l, x2: w - f.pad.r, y1: Y(0), y2: Y(0),
+                                     stroke: "var(--ink)", "stroke-width": 1.5, opacity: 0.5 }));
+
+  const bw = Math.max(3, Math.min(26, (w - f.pad.l - f.pad.r) / (pts.length * 1.4)));
+  pts.forEach((r, i) => {
+    const x = f.x(i + 0.5, 0, pts.length);
+    const d = r.impact.delta;
+    const acted = r.ev.moved.length || r.ev.outliers || r.ev.skip_calibration;
+    const rect = svgEl("rect", {
+      x: x - bw / 2, width: bw,
+      y: Math.min(Y(0), Y(d)), height: Math.max(1.5, Math.abs(Y(d) - Y(0))),
+      fill: d < 0 ? "var(--good)" : "var(--crit)",
+      opacity: acted ? 0.9 : 0.35,
+    });
+    bindTip(rect, `<b>${escapeHtml(r.run.task)} · попытка ${r.ev.attempt}</b><br>` +
+      `<em>триггер</em> ${escapeHtml((r.ev.trigger || "—").slice(0, 140))}<br>` +
+      `<em>действие</em> ${actionLines(r.ev).join("<br>") || "ничего не вызвал"}<br>` +
+      `<em>ошибка</em> ${pct(r.impact.before)} на ${r.impact.snap}% → ${pct(r.impact.after)} далее<br>` +
+      `<em>дельта модуля</em> ${pct(r.impact.delta)}`);
+    f.svg.appendChild(rect);
+  });
+
   const legend = el("div", "legend");
   legend.innerHTML =
-    `<span><i class="swatch" style="background:var(--wake)"></i>сдвинул рычаг</span>` +
-    `<span><i class="swatch" style="background:var(--ink-3)"></i>проснулся, ничего не изменил</span>` +
-    `<span><i class="swatch" style="background:var(--agent)"></i>пометил выбросы</span>`;
-  block.append(legend);
+    `<span><i class="swatch" style="background:var(--good)"></i>ошибка снизилась</span>` +
+    `<span><i class="swatch" style="background:var(--crit)"></i>ошибка выросла</span>` +
+    `<span><i class="swatch" style="background:var(--ink-3);opacity:.35"></i>полупрозрачные — пробуждение без действия</span>`;
 
-  const maxAtt = Math.max(...withAgent.map((r) => r.attempts || 1), 1);
-  for (const run of withAgent) {
-    const lane = el("div", "lane");
-    lane.append(el("div", "lane__t", run.task));
-
-    const f = chartFrame(760, 34, { l: 2, r: 2, t: 2, b: 2 });
-    f.svg.appendChild(svgEl("line", { x1: 2, x2: 758, y1: 17, y2: 17, stroke: "var(--rule)", "stroke-width": 6 }));
-    for (const ev of run.agent_events) {
-      const x = f.x(ev.attempt, 0, maxAtt);
-      const moved = ev.moved.length > 0;
-      const mark = svgEl("line", {
-        x1: x, x2: x, y1: 5, y2: 29,
-        stroke: ev.outliers > 0 ? "var(--agent)" : moved ? "var(--wake)" : "var(--ink-3)",
-        "stroke-width": moved || ev.outliers ? 3 : 1.5,
-        opacity: moved || ev.outliers ? 1 : 0.6,
-      });
-      const levers = ev.moved.length
-        ? ev.moved.map((k) => `${LEVER_RU[k] || k} → ${ev.levers[k]}`).join("<br>")
-        : "<em>рычаги не тронуты</em>";
-      bindTip(mark, `<b>попытка ${ev.attempt}</b>${ev.ts ? ` <em>${ev.ts}</em>` : ""}<br>` +
-                    `${levers}${ev.outliers ? `<br>помечено выбросов: ${ev.outliers}` : ""}<br>` +
-                    `<em>триггер</em> ${ev.trigger || "—"}` +
-                    (ev.reason ? `<br><em>почему</em> ${ev.reason.slice(0, 260)}` : ""));
-      f.svg.appendChild(mark);
-    }
-    lane.append(f.svg);
-    const acted = run.agent_events.filter((e) => e.moved.length || e.outliers).length;
-    lane.append(el("div", "lane__n", `${acted}/${run.agent_events.length} с действием`));
-    block.append(lane);
-  }
-  return block;
+  const wrap = el("div");
+  wrap.append(legend);
+  const cw = el("div", "chartwrap");
+  cw.append(f.svg);
+  wrap.append(cw);
+  return wrap;
 }
 
 function smallMultiples(paired) {
   const block = el("div", "block");
   const head = el("div", "block__head");
   head.append(el("h3", null, "По задачам"));
-  head.append(el("p", null, "Та же кривая ошибки на каждой задаче отдельно — чтобы одиночная удача или провал не спрятались внутри медианы."));
+  head.append(el("p", null, "Та же кривая ошибки со знаком на каждой задаче отдельно — чтобы одиночная удача или провал не спрятались внутри медианы. Тонкая линия — ноль."));
   block.append(head);
 
   const legend = el("div", "legend");
@@ -920,17 +1216,25 @@ function smallMultiples(paired) {
   for (const [key, c] of paired) {
     const cell = el("div", "small");
     cell.append(el("div", "small__t", key));
-    const f = chartFrame(300, 128, { l: 30, r: 8, t: 10, b: 20 });
+    const f = chartFrame(300, 132, { l: 38, r: 8, t: 10, b: 20 });
+    // signed, like the headline chart: the direction of the miss is the point
     const curves = ["noagent", "withagent"].map((cond) =>
-      GRID.map((p) => ({ p, v: Math.abs(errAt(c[cond], p, S.metric) ?? 0) })));
-    const top = Math.max(20, Math.ceil(Math.max(...curves.flat().map((d) => d.v)) / 10) * 10);
-    yAxis(f, 0, top, [0, Math.round(top / 2), top], null);
+      GRID.map((p) => ({ p, v: errAt(c[cond], p, S.metric) })).filter((d) => d.v != null));
+    const vals = curves.flat().map((d) => Math.max(-400, Math.min(400, d.v)));
+    let lo = Math.min(0, ...vals), hi = Math.max(0, ...vals);
+    const pd = Math.max(4, (hi - lo) * 0.1);
+    lo -= pd; hi += pd;
+    yAxis(f, lo, hi, signedTicks(lo, hi).filter((_, i, a) => a.length <= 4 || i % 2 === 0), null);
     xAxis(f, 5, 100, [5, 50, 100], "");
+    const zy = f.y(0, lo, hi);
+    f.svg.appendChild(svgEl("line", { x1: f.pad.l, x2: 300 - f.pad.r, y1: zy, y2: zy,
+                                       stroke: "var(--ink)", "stroke-width": 1, opacity: 0.45 }));
     curves.forEach((pts, i) => {
+      if (!pts.length) return;
       const path = svgEl("path", {
         class: "line", "stroke-width": 1.8,
         stroke: i ? "var(--agent)" : "var(--auto)",
-        d: linePath(pts.map((d) => [f.x(d.p, 5, 100), f.y(Math.min(d.v, top), 0, top)])),
+        d: linePath(pts.map((d) => [f.x(d.p, 5, 100), f.y(Math.max(lo, Math.min(hi, d.v)), lo, hi)])),
       });
       if (!i) path.setAttribute("stroke-dasharray", "4 3");
       f.svg.appendChild(path);
@@ -951,35 +1255,206 @@ function finalTable(tasks) {
   const head = el("div", "block__head");
   head.append(el("h3", null, "Итог: прогноз против факта"));
   head.append(el("p", null,
-    "Медиана всех прогнозов, которые прогон успел опубликовать, против того, во что он реально обошёлся. "
-    + "Медиана, а не последнее значение: последняя точка — это оценка, у которой почти не осталось "
-    + "неизвестного хвоста, она польстила бы модели."));
+    "Медиана всех прогнозов, которые прогон успел опубликовать, против того, во что он реально обошёлся — "
+    + "и по времени, и по токенам сразу: это два разных провала, время анкорится на измеренном wall time, "
+    + "токены нет. Медиана, а не последнее значение: последняя точка — это оценка, у которой почти не "
+    + "осталось неизвестного хвоста, она польстила бы модели."));
   block.append(head);
 
-  const m = METRIC[S.metric];
-  const t = el("table", "grid-table");
-  t.innerHTML = `<thead><tr><th>Задача</th><th>Условие</th><th>Прогноз (медиана)</th><th>Факт</th><th>Ошибка</th><th>Пробуждений</th></tr></thead>`;
+  // Both metrics side by side: the run is only "predicted well" if time AND
+  // tokens land, and they fail in different ways — duration is anchored on
+  // measured wall time, tokens are not.
+  const t = el("table", "grid-table finaltable");
+  t.innerHTML =
+    "<thead>"
+    + "<tr><th rowspan='2'>Задача</th><th rowspan='2'>Условие</th>"
+    + "<th colspan='3' class='grp'>Время</th><th colspan='3' class='grp'>Токены</th>"
+    + "<th rowspan='2'>Пробуждений</th></tr>"
+    + "<tr><th>прогноз</th><th>факт</th><th>ошибка</th>"
+    + "<th>прогноз</th><th>факт</th><th>ошибка</th></tr>"
+    + "</thead>";
   const tb = el("tbody");
+
+  const cells = (run, metric, tr) => {
+    const m = METRIC[metric];
+    const med = median(run.series.map((x) => x[m.pred]).filter((v) => v != null));
+    const actual = run[m.actual];
+    const err = med != null && actual ? ((med - actual) / actual) * 100 : null;
+    tr.append(el("td", "num", med != null ? fmt(med, m.unit) : "—"));
+    tr.append(el("td", "num", actual ? fmt(actual, m.unit) : "—"));
+    const e = el("td", "num", pct(err));
+    if (err != null) e.classList.add(Math.abs(err) <= 10 ? "win" : "loss");
+    tr.append(e);
+    return err;
+  };
+
+  const errs = { duration: { noagent: [], withagent: [] }, tokens: { noagent: [], withagent: [] } };
   for (const [key, c] of tasks) {
     let first = true;
     for (const cond of ["noagent", "withagent"]) {
       const run = c[cond];
       if (!run) continue;
-      const med = median(run.series.map((x) => x[m.pred]));
-      const actual = run[m.actual];
-      const err = med != null && actual ? ((med - actual) / actual) * 100 : null;
       const tr = el("tr");
+      if (first) tr.classList.add("row--group");
       tr.append(el("td", null, first ? key : ""));
       tr.append(el("td", null, COND_RU[cond]));
-      tr.append(el("td", null, med != null ? fmt(med, m.unit) : "—"));
-      tr.append(el("td", null, fmt(actual, m.unit)));
-      const e = el("td", null, pct(err));
-      if (err != null) e.classList.add(Math.abs(err) <= 10 ? "win" : "loss");
-      tr.append(e);
-      tr.append(el("td", null, run.agent_events.length ? String(run.agent_events.length) : "—"));
+      for (const metric of ["duration", "tokens"]) {
+        const e = cells(run, metric, tr);
+        if (e != null) errs[metric][cond].push(Math.abs(e));
+      }
+      tr.append(el("td", "num", run.agent_events.length ? String(run.agent_events.length) : "—"));
       tb.append(tr);
       first = false;
     }
+  }
+
+  // medians across tasks, so the table answers "and overall?" without a
+  // second pass by eye
+  for (const cond of ["noagent", "withagent"]) {
+    const tr = el("tr", "row--total");
+    tr.append(el("td", null, "медиана |ошибки|"));
+    tr.append(el("td", null, COND_RU[cond]));
+    for (const metric of ["duration", "tokens"]) {
+      tr.append(el("td", "num", ""), el("td", "num", ""));
+      const med = median(errs[metric][cond]);
+      const c = el("td", "num", med == null ? "—" : `${med.toFixed(1)}%`);
+      if (med != null) c.classList.add(med <= 10 ? "win" : "loss");
+      tr.append(c);
+    }
+    tr.append(el("td", "num", ""));
+    tb.append(tr);
+  }
+  t.append(tb);
+  block.append(t);
+  return block;
+}
+
+/* ─────────────────────────── накладной расход наблюдателя ── */
+
+const OBSERVER_STAGE = "CostMonitorAgent";
+
+/** What the monitor costs the very run it is measuring.
+ *
+ *  CostMonitorAgent's own inference is emitted as an LLM_CALL like any other
+ *  stage, so it is inside the telemetry the cost model is fitted on. When one
+ *  of those calls is slow it shows up as the run's biggest latency outlier —
+ *  and the agent has been observed flagging it as an anomaly. */
+function observerBlock(runs) {
+  const rows = runs.filter((r) => r.stages && r.stages[OBSERVER_STAGE]);
+  const block = el("div", "block");
+  const head = el("div", "block__head");
+  head.append(el("h3", null, "Наблюдатель внутри наблюдаемого"));
+  head.append(el("p", null,
+    "Вызовы самого CostMonitorAgent идут по той же шине событий, что и мутации, "
+    + "и попадают в телеметрию, по которой строится прогноз. Здесь видно, сколько "
+    + "измеренной латентности и токенов прогона принадлежит наблюдателю, и насколько "
+    + "его самый долгий вызов выделяется на фоне остальных."));
+  block.append(head);
+  if (!rows.length) {
+    block.append(el("p", "empty", "В логах нет вызовов CostMonitorAgent — либо это прогоны без агента, либо старый формат."));
+    return block;
+  }
+
+  const t = el("table", "grid-table");
+  t.innerHTML = "<thead><tr><th>Прогон</th><th>Вызовов агента</th><th>Доля латентности</th>"
+    + "<th>Доля токенов</th><th>Самый долгий вызов</th><th>Медиана по прогону</th></tr></thead>";
+  const tb = el("tbody");
+  for (const run of rows) {
+    const st = run.stages;
+    const totLat = Object.values(st).reduce((a, s) => a + s.latency_ms, 0) || 1;
+    const totTok = Object.values(st).reduce((a, s) => a + s.tokens, 0) || 1;
+    const o = st[OBSERVER_STAGE];
+    const share = (o.latency_ms / totLat) * 100;
+    // median per-call latency across every other stage, as the yardstick the
+    // observer's worst call is measured against
+    const others = Object.entries(st).filter(([k]) => k !== OBSERVER_STAGE)
+                         .map(([, s]) => s.latency_ms / Math.max(s.calls, 1));
+    const base = median(others) || 0;
+
+    const tr = el("tr");
+    tr.append(el("td", null, `${run.task} · ${COND_RU[run.condition]}`));
+    tr.append(el("td", "num", String(o.calls)));
+    const sc = el("td", "num", `${share.toFixed(1)}%`);
+    if (share > 10) sc.classList.add("loss");
+    else if (share <= 3) sc.classList.add("win");
+    tr.append(sc);
+    tr.append(el("td", "num", `${((o.tokens / totTok) * 100).toFixed(1)}%`));
+    const mx = el("td", "num", fmt(o.max_latency_ms / 1000, "s"));
+    if (base && o.max_latency_ms / base > 5) {
+      mx.classList.add("loss");
+      mx.title = `в ${(o.max_latency_ms / base).toFixed(1)}× дольше медианного вызова прогона — `
+        + "такой вызов агент видит как выброс в собственной телеметрии";
+    }
+    tr.append(mx);
+    tr.append(el("td", "num", base ? fmt(base / 1000, "s") : "—"));
+    tb.append(tr);
+  }
+  t.append(tb);
+  block.append(t);
+  return block;
+}
+
+/* ──────────────────────────────── устойчивость оценщика ── */
+
+/** Two calibration numbers the raw series already contains:
+ *
+ *  breaches — how often a new estimate lands outside the interval the PREVIOUS
+ *  estimate published. That is exactly the agent's wakeup condition, so it is
+ *  also the wakeup rate the harness is going to see.
+ *
+ *  coverage — how often the published interval actually contained the final
+ *  measured value. An interval that is never breached but never covers the
+ *  truth is just a wide interval. */
+function stabilityRow(run, metric) {
+  const m = METRIC[metric], s = run.series, actual = run[m.actual];
+  let breaches = 0, covered = 0, n = 0;
+  let prev = null;
+  for (const p of s) {
+    const lo = p[m.lo], hi = p[m.hi], v = p[m.pred];
+    if (prev && prev.hi > prev.lo && prev.lo > 0 && !(v >= prev.lo && v <= prev.hi)) breaches += 1;
+    if (actual && hi > lo) { n += 1; if (actual >= lo && actual <= hi) covered += 1; }
+    prev = { lo, hi };
+  }
+  return {
+    run, points: s.length,
+    breach: s.length > 1 ? (breaches / (s.length - 1)) * 100 : null,
+    coverage: n ? (covered / n) * 100 : null,
+  };
+}
+
+function stabilityBlock(runs) {
+  const block = el("div", "block");
+  const head = el("div", "block__head");
+  head.append(el("h3", null, "Устойчивость и калибровка оценщика"));
+  head.append(el("p", null,
+    "«Пробитий» — доля точек, где новая оценка вышла за интервал, который объявила предыдущая. "
+    + "Это же условие будит агента, то есть это и есть частота его пробуждений. «Покрытие» — "
+    + "доля точек, чей интервал реально накрыл итоговый факт: интервал, который никогда не "
+    + "пробивается, но и не накрывает правду, просто слишком широк."));
+  block.append(head);
+
+  const rows = runs.filter((r) => r.series.length > 1).map((r) => stabilityRow(r, S.metric));
+  if (!rows.length) {
+    block.append(el("p", "empty", "Ещё нет прогонов с рядом прогнозов."));
+    return block;
+  }
+
+  const t = el("table", "grid-table");
+  t.innerHTML = "<thead><tr><th>Прогон</th><th>Условие</th><th>Точек</th>"
+    + "<th>Пробитий своего интервала</th><th>Покрытие факта интервалом</th></tr></thead>";
+  const tb = el("tbody");
+  for (const r of rows.sort((a, b) => (b.breach ?? 0) - (a.breach ?? 0))) {
+    const tr = el("tr");
+    tr.append(el("td", null, r.run.task));
+    tr.append(el("td", null, COND_RU[r.run.condition]));
+    tr.append(el("td", "num", String(r.points)));
+    const b = el("td", "num", r.breach == null ? "—" : `${r.breach.toFixed(0)}%`);
+    if (r.breach != null) b.classList.add(r.breach > 15 ? "loss" : "win");
+    tr.append(b);
+    const c = el("td", "num", r.coverage == null ? "—" : `${r.coverage.toFixed(0)}%`);
+    if (r.coverage != null) c.classList.add(r.coverage >= 60 ? "win" : "loss");
+    tr.append(c);
+    tb.append(tr);
   }
   t.append(tb);
   block.append(t);

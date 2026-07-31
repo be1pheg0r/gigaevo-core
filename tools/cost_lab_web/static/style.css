@@ -318,11 +318,46 @@ table.grid-table { border-collapse: collapse; width: 100%; font-family: var(--mo
 .win { color: var(--good); }
 .loss { color: var(--crit); }
 
-.lane { display: grid; grid-template-columns: 258px minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 7px 0; border-bottom: 1px solid var(--rule-soft); }
-.lane__t { font-family: var(--mono); font-size: 11.5px; color: var(--ink-2); word-break: break-word; line-height: 1.35; }
-.lane__n { font-family: var(--mono); font-size: 11.5px; color: var(--ink-3); }
-
 .empty { color: var(--ink-3); font-size: 14px; padding: 40px 0; text-align: center; }
+.note { font-size: 12.5px; color: var(--wake); margin-top: 10px; line-height: 1.5; }
+.num { font-variant-numeric: tabular-nums; }
+svg .axhint { fill: var(--ink-3); font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.08em; }
+
+/* ─────────────────────── эффективность харнесса агента ── */
+
+.scorecard { display: grid; grid-template-columns: repeat(auto-fit, minmax(158px, 1fr)); gap: 1px;
+  background: var(--rule); border: 1px solid var(--rule); margin: 16px 0 4px; }
+.score { background: var(--surface); padding: 13px 14px; }
+.score__k { font-family: var(--mono); font-size: 10px; letter-spacing: 0.13em; text-transform: uppercase; color: var(--ink-3); }
+.score__v { font-family: var(--mono); font-size: 23px; font-weight: 600; margin-top: 5px; line-height: 1.1; }
+.score__s { font-size: 11.5px; color: var(--ink-3); margin-top: 5px; line-height: 1.4; }
+
+.tooltable td:first-child { max-width: 330px; white-space: normal; }
+.tool__n { font-weight: 600; }
+.tool__h { display: block; color: var(--ink-3); font-size: 11px; margin-top: 2px; }
+.cell--bar { position: relative; min-width: 130px; }
+.bar__f { position: absolute; left: 6px; top: 50%; transform: translateY(-50%); height: 12px;
+  background: color-mix(in srgb, var(--auto) 45%, transparent); border-radius: 1px; }
+.bar__n { position: relative; }
+.cell--na { color: var(--ink-3); font-style: italic; text-align: center !important; }
+.flag { font-size: 11px; padding: 1px 7px; border: 1px solid; border-radius: 2px; }
+.flag--ok { color: var(--good); border-color: color-mix(in srgb, var(--good) 45%, var(--rule)); }
+.flag--bad { color: var(--wake); border-color: color-mix(in srgb, var(--wake) 45%, var(--rule)); cursor: help; }
+
+/* ───────────────────────────── итоговая таблица ── */
+
+.finaltable th.grp { text-align: center; border-left: 1px solid var(--rule); border-right: 1px solid var(--rule); }
+.finaltable tbody tr.row--group td { border-top: 1px solid var(--rule); }
+.finaltable tbody tr.row--total td { color: var(--ink-2); font-weight: 600; border-top: 2px solid var(--rule); }
+
+/* ─────────────────────────── состояние запуска ── */
+
+.driver { border: 1px solid var(--rule); background: var(--sunken); padding: 14px 16px; margin-bottom: 16px; }
+.driver--bad { border-color: color-mix(in srgb, var(--crit) 55%, var(--rule)); }
+.driver__head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 14px; }
+.driver__hint { color: var(--ink-3); font-size: 12px; }
+.driver__log { margin-top: 11px; max-height: 220px; overflow: auto; font-family: var(--mono);
+  font-size: 11.5px; line-height: 1.55; color: var(--ink-2); white-space: pre-wrap; word-break: break-word; }
 
 /* ───────────────────────────── разбор решений агента ── */
 

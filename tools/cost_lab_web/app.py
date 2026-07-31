@@ -56,6 +56,12 @@ ADJ_RE = re.compile(
 TRACE_RE = re.compile(r"\[CostMonitorAgentTrace\] (\{.*\})")
 ATT_RE = re.compile(r"\[MUTATION_ATTEMPTED\]")
 TS_RE = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\.\d+")
+CALL_RE = re.compile(r"\[LLM_CALL\] (\{.*\})")
+
+# The monitor's own inference is emitted as an LLM_CALL like any other stage
+# (LangGraphAgent.acall_llm), so it lands in the very telemetry the cost model
+# is fitted on. Naming it here lets the console show what that costs.
+OBSERVER_STAGE = "CostMonitorAgent"
 
 # Imports every problem gets for free — never reported as a missing dependency.
 _FIRST_PARTY = {"problems", "gigaevo", "config", "tools"}
@@ -144,12 +150,13 @@ def list_problems() -> list[dict]:
 
 # --------------------------------------------------------------- experiments
 
-def parse_agent_events(path: Path) -> tuple[list[dict], int]:
+def parse_agent_events(path: Path) -> tuple[list[dict], int, dict[str, dict]]:
     """The agent's own wakeup record: attempt, trigger, levers, reasoning.
 
-    Returns the events plus the total `[MUTATION_ATTEMPTED]` count, which is
-    the fallback progress figure for logs written before the prediction line
-    carried an ``attempts`` field.
+    Returns the events, the total `[MUTATION_ATTEMPTED]` count (the fallback
+    progress figure for logs written before the prediction line carried an
+    ``attempts`` field), and per-stage LLM-call totals — all in ONE pass, so
+    adding the stage breakdown did not add a third read of a 10k-line log.
 
     A lever value of -1 means 'agent declined to move this one', so an event
     where all four are -1 is a wakeup that changed nothing — worth showing,
@@ -158,10 +165,25 @@ def parse_agent_events(path: Path) -> tuple[list[dict], int]:
     traces: list[dict] = []   # new format: decision + the evidence behind it
     legacy: list[dict] = []   # pre-trace logs: the decision alone
     attempts = 0
+    stages: dict[str, dict] = {}
     with open(path, encoding="utf-8", errors="replace") as f:
         for lineno, line in enumerate(f, 1):
             if ATT_RE.search(line):
                 attempts += 1
+                continue
+            m = CALL_RE.search(line)
+            if m:
+                try:
+                    c = json.loads(m.group(1))
+                except json.JSONDecodeError:
+                    continue
+                s = stages.setdefault(c.get("stage") or "?",
+                                      {"calls": 0, "latency_ms": 0.0, "tokens": 0, "max_latency_ms": 0.0})
+                lat = float(c.get("latency_ms") or 0.0)
+                s["calls"] += 1
+                s["latency_ms"] += lat
+                s["max_latency_ms"] = max(s["max_latency_ms"], lat)
+                s["tokens"] += int(c.get("tokens_in") or 0) + int(c.get("tokens_out") or 0)
                 continue
             m = TRACE_RE.search(line)
             if m:
@@ -219,7 +241,7 @@ def parse_agent_events(path: Path) -> tuple[list[dict], int]:
             })
     # Both lines are written for the same wakeup, so a log that has traces
     # must be read only through them — the legacy line would double-count.
-    return (traces or legacy), attempts
+    return (traces or legacy), attempts, stages
 
 
 def run_status(log_path: Path, has_duration: bool) -> str:
@@ -237,9 +259,10 @@ def summarize_run(entry: dict) -> dict:
     series, duration, actual_tokens = ([], None, 0)
     events: list[dict] = []
     attempts = 0
+    stages: dict[str, dict] = {}
     if log_path.exists():
         series, duration, actual_tokens = parse_log(log_path)
-        events, attempts = parse_agent_events(log_path)
+        events, attempts, stages = parse_agent_events(log_path)
     return {
         **{k: entry[k] for k in ("task", "key", "condition", "db")},
         "log": entry["log"],
@@ -249,8 +272,33 @@ def summarize_run(entry: dict) -> dict:
         "actual_duration": duration,
         "actual_tokens": actual_tokens or None,
         "agent_events": events,
+        "stages": stages,
         "attempts": (series[-1].get("attempts") if series else 0) or attempts,
         "updated": log_path.stat().st_mtime if log_path.exists() else None,
+    }
+
+
+def driver_state(name: str) -> dict:
+    """Is the launcher alive, and what has it said so far.
+
+    The driver spends its first minute scanning 128 redis dbs and staggering
+    launches, so without this the console had nothing to show between the
+    click and the first run's log appearing — which read as "nothing
+    happened". A non-zero ``returncode`` is a launch that died; its tail is
+    the only place the reason exists.
+    """
+    log = EXPERIMENTS / f"{name}.driver.log"
+    launch = _launches.get(name)
+    rc = launch.proc.poll() if launch else None
+    tail = _peek(log)[-6000:] if log.is_file() else ""
+    return {
+        "known": bool(launch) or log.is_file(),
+        "alive": bool(launch) and rc is None,
+        "returncode": rc,
+        "failed": rc is not None and rc != 0 and not launch.stopped,
+        "stopped": bool(launch and launch.stopped),
+        "log_lines": tail.splitlines()[-120:],
+        "updated": log.stat().st_mtime if log.is_file() else None,
     }
 
 
@@ -274,6 +322,7 @@ class Launch:
     name: str
     proc: subprocess.Popen
     cmd: list[str]
+    stopped: bool = False   # killed on request, so a non-zero exit isn't a crash
 
 
 _launches: dict[str, Launch] = {}
@@ -313,10 +362,13 @@ async def api_problems() -> list[dict]:
 @app.get("/api/experiments")
 async def api_experiments() -> list[dict]:
     out = []
+    seen = set()
     for d in experiment_dirs():
         manifest = load_manifest(d)
         statuses = [run_status(REPO / e["log"], "Duration:" in _peek(REPO / e["log"]))
                     for e in manifest]
+        drv = driver_state(d.name)
+        seen.add(d.name)
         out.append({
             "name": d.name,
             "created": d.stat().st_mtime,
@@ -324,9 +376,21 @@ async def api_experiments() -> list[dict]:
             "tasks": sorted({e["task"] for e in manifest}),
             "running": statuses.count("running"),
             "done": statuses.count("done"),
-            "launching": d.name in _launches and _launches[d.name].proc.poll() is None,
+            "launching": drv["alive"],
+            "failed": drv["failed"],
         })
-    return out
+    # A launch that died before writing its manifest has only a driver log —
+    # list it anyway, otherwise a failed start is indistinguishable from a
+    # button that did nothing.
+    for name, launch in _launches.items():
+        if name in seen:
+            continue
+        drv = driver_state(name)
+        out.append({
+            "name": name, "created": time.time(), "n_runs": 0, "tasks": [],
+            "running": 0, "done": 0, "launching": drv["alive"], "failed": drv["failed"],
+        })
+    return sorted(out, key=lambda e: e["created"], reverse=True)
 
 
 # ponytail: fixed-size tail instead of parsing the whole log on every poll —
@@ -350,18 +414,22 @@ def _peek(path: Path) -> str:
 @app.get("/api/experiments/{name}")
 async def api_experiment(name: str) -> dict:
     d = EXPERIMENTS / name
-    if not (d / "manifest.json").exists():
+    drv = driver_state(name)
+    # No manifest yet is normal for the first seconds of a launch — answer with
+    # the driver's own output rather than 404, so the console can show progress
+    # instead of an error while the launcher is still scanning redis.
+    if not (d / "manifest.json").exists() and not drv["known"]:
         raise HTTPException(404, "unknown experiment")
     manifest = load_manifest(d)
     runs = [summarize_run(e) for e in manifest]
     report = sorted(p.name for p in (d / "report").glob("*")) if (d / "report").exists() else []
-    launch = _launches.get(name)
     return {
         "name": name,
-        "created": d.stat().st_mtime,
+        "created": d.stat().st_mtime if d.exists() else time.time(),
         "runs": runs,
         "report": report,
-        "driver_alive": bool(launch and launch.proc.poll() is None),
+        "driver": drv,
+        "driver_alive": drv["alive"],
     }
 
 
@@ -394,12 +462,19 @@ async def api_launch(body: NewExperiment) -> dict:
 async def api_stop(name: str) -> dict:
     launch = _launches.get(name)
     killed = 0
-    if launch and launch.proc.poll() is None:
-        launch.proc.kill()
-        killed += 1
-    # the driver's children are separate run.py processes — stop them by out-dir
-    r = subprocess.run(["pkill", "-f", f"experiments/{name}"], capture_output=True)
-    return {"ok": True, "driver_killed": killed, "pkill_rc": r.returncode}
+    if launch:
+        launch.stopped = True
+        if launch.proc.poll() is None:
+            launch.proc.kill()
+            killed += 1
+    # The driver's children are separate run.py processes — stop them by out-dir.
+    # Killing the driver already worked at this point, so a missing pkill must
+    # not turn the whole request into a 500 and hide that.
+    try:
+        rc = subprocess.run(["pkill", "-f", f"experiments/{name}"], capture_output=True).returncode
+    except OSError as exc:
+        return {"ok": True, "driver_killed": killed, "pkill_rc": None, "warning": str(exc)}
+    return {"ok": True, "driver_killed": killed, "pkill_rc": rc}
 
 
 @app.post("/api/experiments/{name}/report")
@@ -497,7 +572,7 @@ def _selftest() -> None:
         f.write(log)
         p = Path(f.name)
     try:
-        ev, attempts = parse_agent_events(p)
+        ev, attempts, stages = parse_agent_events(p)
         assert len(ev) == 2, ev
         assert attempts == 3, attempts  # fallback progress for pre-`attempts` logs
         assert all(e["evidence"] == {} for e in ev)  # old format carries no evidence
@@ -537,7 +612,7 @@ def _selftest() -> None:
             f.write(trace_log)
             p2 = Path(f.name)
         try:
-            ev2, _ = parse_agent_events(p2)
+            ev2, _, _ = parse_agent_events(p2)
             assert len(ev2) == 1, ev2  # the adjustments line must not double-count
             e = ev2[0]
             assert e["attempt"] == 7 and e["line"] == 2, e
@@ -547,6 +622,34 @@ def _selftest() -> None:
             assert e["outliers"] == 2 and e["evidence"]["get_progress"] == "attempts 7/100"
         finally:
             p2.unlink(missing_ok=True)
+
+        # per-stage LLM totals, incl. the monitor's own calls — the whole point
+        # of the observer-overhead widget is that this stage is in there at all
+        calls = (
+            '2026-07-31 17:00:00.000 | INFO | x | [LLM_CALL] '
+            '{"stage": "MutationAgent", "latency_ms": 30000, "tokens_in": 3800, "tokens_out": 1000}\n'
+            '2026-07-31 17:00:01.000 | INFO | x | [LLM_CALL] '
+            '{"stage": "CostMonitorAgent", "latency_ms": 280660, "tokens_in": 1101, "tokens_out": 39}\n'
+            '2026-07-31 17:00:02.000 | INFO | x | [LLM_CALL] '
+            '{"stage": "MutationAgent", "latency_ms": 10000, "tokens_in": 100, "tokens_out": 10}\n'
+        )
+        with tempfile.NamedTemporaryFile("w", suffix=".log", delete=False, encoding="utf-8") as f:
+            f.write(calls)
+            p3 = Path(f.name)
+        try:
+            _, _, st = parse_agent_events(p3)
+            assert st["MutationAgent"]["calls"] == 2, st
+            assert st["MutationAgent"]["tokens"] == 4910, st
+            assert st[OBSERVER_STAGE]["calls"] == 1, st
+            assert st[OBSERVER_STAGE]["max_latency_ms"] == 280660, st
+            # the observer is a real share of measured latency, not a rounding error
+            total = sum(v["latency_ms"] for v in st.values())
+            assert st[OBSERVER_STAGE]["latency_ms"] / total > 0.8, st
+        finally:
+            p3.unlink(missing_ok=True)
+
+        # a launch nobody ever started is unknown; anything else must not 404
+        assert driver_state("no-such-experiment-at-all")["known"] is False
 
         # preflight: a problem importing a module this env lacks must say so
         import tempfile as _tf

@@ -81,11 +81,23 @@ def is_finished(log_path: Path) -> bool:
     return "Duration:" in text
 
 
-def run_wave(tasks: list[str], out_dir: Path, args) -> list[dict]:
-    """Launch both conditions for every task in ``tasks``, wait, return manifest rows."""
+def write_manifest(out_dir: Path, manifest: list[dict]) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+
+def run_wave(tasks: list[str], out_dir: Path, args, manifest: list[dict]) -> None:
+    """Launch both conditions for every task in ``tasks``, then wait for them.
+
+    Appends to ``manifest`` and flushes it to disk after EVERY launch, not
+    once the wave has finished: the manifest is what tools/cost_lab_web reads
+    to know an experiment exists at all, and a wave takes tens of minutes.
+    Writing it only at the end made a freshly launched experiment invisible
+    in the console for the whole first wave.
+    """
     dbs = find_free_dbs(len(tasks) * len(CONDITIONS))
 
-    rows, procs = [], []
+    procs = []
     i = 0
     for task in tasks:
         key = task.replace("/", "_")
@@ -94,10 +106,11 @@ def run_wave(tasks: list[str], out_dir: Path, args) -> list[dict]:
             i += 1
             log_path = out_dir / f"{key}_{cond_name}.log"
             proc = launch(task, db, args.max_mutants, args.llm, cost_monitor, log_path)
-            rows.append({
+            manifest.append({
                 "task": task, "key": key, "condition": cond_name, "db": db,
                 "log": str(log_path.relative_to(REPO_ROOT)), "pid": proc.pid,
             })
+            write_manifest(out_dir, manifest)
             procs.append((proc, log_path))
             print(f"launched {task} [{cond_name}] db={db} pid={proc.pid} -> {log_path}", flush=True)
             time.sleep(2)  # stagger to avoid a redis/ssh connection burst
@@ -116,7 +129,6 @@ def run_wave(tasks: list[str], out_dir: Path, args) -> list[dict]:
         for proc, _ in procs:
             if proc.poll() is None:
                 proc.kill()
-    return rows
 
 
 def main() -> None:
@@ -137,16 +149,18 @@ def main() -> None:
     args = ap.parse_args()
 
     out_dir = REPO_ROOT / args.out_dir
-    out_dir.mkdir(parents=True, exist_ok=True)
+    # Empty manifest up front: the console lists an experiment by its manifest,
+    # so this is what makes the run appear the moment the driver starts rather
+    # than after the first wave (redis db scan + stagger take a while).
+    write_manifest(out_dir, [])
 
     step = args.wave_size if args.wave_size > 0 else len(args.tasks)
     manifest: list[dict] = []
     for w, start_i in enumerate(range(0, len(args.tasks), step), 1):
         batch = args.tasks[start_i:start_i + step]
         print(f"=== wave {w}: {' '.join(batch)}", flush=True)
-        manifest += run_wave(batch, out_dir, args)
-        # rewrite after every wave so a crash still leaves a usable manifest
-        (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        run_wave(batch, out_dir, args, manifest)
+        write_manifest(out_dir, manifest)
     print(f"manifest written to {out_dir / 'manifest.json'}", flush=True)
 
     if not args.skip_report:
