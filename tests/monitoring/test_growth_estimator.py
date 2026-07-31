@@ -13,6 +13,9 @@ from gigaevo.monitoring.growth_estimator import (
     estimate_by_stage,
     estimate_duration_by_stage,
     fit_ttft_tpot,
+    tail_ci_bayesian,
+    tail_ci_bootstrap,
+    tail_ci_montecarlo,
     tail_integral,
 )
 
@@ -204,3 +207,27 @@ def test_tail_integral_never_undercuts_what_was_already_observed() -> None:
     # 6 more buckets should be worth roughly what the observed 6 were worth,
     # not the (much smaller) median-based extrapolation.
     assert tail > sum(values) * 0.3
+
+
+@pytest.mark.parametrize("ci_fn", [tail_ci_bootstrap, tail_ci_montecarlo, tail_ci_bayesian])
+def test_probabilistic_ci_methods_anchor_above_observed_sum(ci_fn) -> None:
+    # The true total can only grow from here, so the CI floor must never
+    # drop below what's already been observed (same invariant as tail_integral).
+    values = [100.0, 120.0, 110.0, 130.0, 115.0, 125.0]
+    lo, hi = ci_fn(RobustPowerLaw, values, 12)
+    assert sum(values) <= lo <= hi
+
+
+@pytest.mark.parametrize("ci_fn", [tail_ci_bootstrap, tail_ci_montecarlo, tail_ci_bayesian])
+def test_probabilistic_ci_methods_widen_on_noisier_residuals(ci_fn) -> None:
+    calm = [100.0, 102.0, 99.0, 101.0, 100.0, 103.0]
+    noisy = [40.0, 180.0, 60.0, 160.0, 50.0, 170.0]
+    lo_c, hi_c = ci_fn(LinearLaw, calm, 12)
+    lo_n, hi_n = ci_fn(LinearLaw, noisy, 12)
+    assert (hi_n - lo_n) > (hi_c - lo_c)
+
+
+@pytest.mark.parametrize("ci_fn", [tail_ci_bootstrap, tail_ci_montecarlo, tail_ci_bayesian])
+def test_probabilistic_ci_methods_collapse_with_too_few_points(ci_fn) -> None:
+    assert ci_fn(LinearLaw, [100.0], 12) == (100.0, 100.0)
+    assert ci_fn(LinearLaw, [], 12) == (0.0, 0.0)

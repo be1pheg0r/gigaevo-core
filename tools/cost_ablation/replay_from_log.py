@@ -44,6 +44,65 @@ from gigaevo.monitoring.cost_monitor_hook import CostMonitorHook, _clamp_step
 from gigaevo.monitoring.cost_predictor import CostPrediction
 from gigaevo.monitoring.emit import emit, reset_subscribers
 from gigaevo.monitoring.events import BackpressureSample, LLMCall, MutationAttempted, StageExec
+from gigaevo.monitoring.growth_estimator import (
+    RobustPowerLaw,
+    achieved_concurrency,
+    estimate_by_stage,
+    estimate_duration_by_stage,
+)
+
+# All CI methods to compare at each checkpoint; None = the original
+# 1/sqrt(n) heuristic. See growth_estimator.CI_METHODS for the other three.
+CI_METHODS_TO_COMPARE = (None, "bootstrap", "montecarlo", "bayesian")
+
+
+def _snapshot_estimate(hook: CostMonitorHook, frac: float) -> dict:
+    """Recompute tokens_ci/duration_ci from ``hook``'s CURRENT accumulated
+    per-stage state, once per CI method — read-only, doesn't touch the
+    hook's own ``_ci_method``/``_pred``. Mirrors the estimate half of
+    CostMonitorHook._flush_mutant_bucket (kept separate rather than
+    refactoring the hot path, since this needs to vary ci_method per call
+    where the live hook fixes it at construction).
+    """
+    total_units_by_stage = {
+        stage: max(1, round(hook._pred.max_mutants * len(series) / max(hook._attempts, 1)))
+        for stage, series in hook._tokens_by_stage.items()
+    }
+    total_units_by_stage.update({
+        stage: max(1, round(hook._pred.max_mutants * len(series) / max(hook._attempts, 1)))
+        for stage, series in hook._nonllm_duration_by_stage.items()
+    })
+    fit_tokens = hook._winsorised(hook._tokens_by_stage)
+    fit_tokens_out = hook._winsorised(hook._tokens_out_by_stage)
+    fit_latency = hook._winsorised(hook._latency_by_stage)
+    fit_nonllm = hook._winsorised(hook._nonllm_duration_by_stage)
+    elapsed_s = hook._clock() - hook._t0
+    concurrency = achieved_concurrency(
+        hook._call_times, now_s=elapsed_s, max_in_flight=hook._pred.max_in_flight)
+
+    row: dict = {"frac": frac, "attempts": hook._attempts, "elapsed_s": elapsed_s}
+    for method in CI_METHODS_TO_COMPARE:
+        est = estimate_by_stage(
+            hook._tokens_by_stage, hook._latency_by_stage,
+            total_units_by_stage=total_units_by_stage, max_in_flight=hook._pred.max_in_flight,
+            law_cls=RobustPowerLaw, fit_tokens_by_stage=fit_tokens, fit_latency_by_stage=fit_latency,
+            ci_method=method,
+        )
+        duration_s, duration_ci = estimate_duration_by_stage(
+            hook._tokens_out_by_stage, hook._latency_by_stage,
+            total_units_by_stage=total_units_by_stage, max_in_flight=hook._pred.max_in_flight,
+            nonllm_duration_by_stage=hook._nonllm_duration_by_stage,
+            elapsed_s=elapsed_s, concurrency=concurrency, tail_mult=1.0,
+            fit_tokens_out_by_stage=fit_tokens_out, fit_latency_by_stage=fit_latency,
+            fit_nonllm_by_stage=fit_nonllm, ci_method=method,
+        )
+        row[method or "heuristic"] = {
+            "predicted_tokens": est.predicted_total_tokens,
+            "tokens_ci": est.tokens_ci,
+            "predicted_duration_s": duration_s,
+            "duration_ci": duration_ci,
+        }
+    return row
 
 TS_RE = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d+)")
 MAX_MUTANTS_RE = re.compile(r"Evolution running \(max_mutants=(\d+)\)")
@@ -68,7 +127,8 @@ EVENT_CLASSES = {
 
 
 def replay_log(path: Path, *, apply_agent: bool = False,
-               outlier_policy: bool = False) -> dict | None:
+               outlier_policy: bool = False, ci_method: str | None = None,
+               ci_checkpoint_fracs: list[float] | None = None) -> dict | None:
     """Parse ``path``'s raw events + ground truth, replay the events through
     a fresh CostMonitorHook using the currently-installed code, and return a
     summary dict shaped like build_report.summarize()'s output — or None if
@@ -142,11 +202,14 @@ def replay_log(path: Path, *, apply_agent: bool = False,
         clock_now = [0.0]
         hook = CostMonitorHook(  # noqa: F841
             agent=NoOpCostMonitorAgent(), prediction=pred, interval=5,
-            clock=lambda: clock_now[0],
+            clock=lambda: clock_now[0], ci_method=ci_method,
         )
 
         pending_adj = list(adjustments) if apply_agent else []
         series = []
+        ci_checkpoints: list[dict] = []
+        next_ckpt_idx = 0
+        ckpt_fracs = sorted(ci_checkpoint_fracs) if ci_checkpoint_fracs else []
         for name, payload, ts in events_in_order:
             clock_now[0] = ts
             while pending_adj and pending_adj[0][0] <= ts:
@@ -197,8 +260,14 @@ def replay_log(path: Path, *, apply_agent: bool = False,
                     "predicted_duration_s": pred.predicted_duration_s,
                     "ci_low_s": pred.ci_low_s,
                     "ci_high_s": pred.ci_high_s,
+                    "token_ci_low": pred.token_ci_low,
+                    "token_ci_high": pred.token_ci_high,
                     "elapsed_s": ts,
                 })
+                while (next_ckpt_idx < len(ckpt_fracs)
+                       and hook._attempts / max(max_mutants, 1) >= ckpt_fracs[next_ckpt_idx]):
+                    ci_checkpoints.append(_snapshot_estimate(hook, ckpt_fracs[next_ckpt_idx]))
+                    next_ckpt_idx += 1
     finally:
         reset_subscribers()
 
@@ -215,6 +284,7 @@ def replay_log(path: Path, *, apply_agent: bool = False,
         actual_tokens=actual_tokens, actual_duration=actual_duration,
         tok_err_pct=(last["predicted_tokens"] - actual_tokens) / actual_tokens * 100,
         dur_err_pct=(last["predicted_duration_s"] - actual_duration) / actual_duration * 100,
+        ci_checkpoints=ci_checkpoints,
     )
 
 
@@ -223,6 +293,8 @@ def main() -> None:
     ap.add_argument("logs", nargs="+", type=Path, help="run.py log file(s) to replay")
     ap.add_argument("--out-dir", type=Path, default=None,
                      help="if set, write comparison_table.tex/.png + error_decay_plots.png here")
+    ap.add_argument("--ci-method", choices=["bootstrap", "montecarlo", "bayesian"], default=None,
+                     help="swap the CI width for a probabilistic method (default: 1/sqrt(n) heuristic)")
     args = ap.parse_args()
 
     # emit() re-logs every replayed event through loguru at INFO — noisy and
@@ -233,7 +305,7 @@ def main() -> None:
     print(f"{'log':45s} {'n':>5s} {'pred_tok':>10s} {'act_tok':>10s} {'tok_err%':>9s} "
           f"{'pred_dur':>9s} {'act_dur':>9s} {'dur_err%':>9s}")
     for log_path in args.logs:
-        result = replay_log(log_path)
+        result = replay_log(log_path, ci_method=args.ci_method)
         if not result:
             print(f"{log_path.name:45s} -- skipped (no events / no ground truth)")
             continue

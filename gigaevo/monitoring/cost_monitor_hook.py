@@ -59,12 +59,17 @@ class CostMonitorHook:
         cooldown_attempts: int = 5,
         warmup_attempts: int = 5,
         min_leverage: float = 0.15,
+        ci_method: str | None = None,
     ):
         self._agent = agent
         self._pred = prediction
         self._interval = interval
         self._counter = 0
         self._clock = clock
+        # Which CI-width method feeds tokens_ci/duration_ci — None keeps the
+        # original 1/sqrt(n) heuristic; see growth_estimator.CI_METHODS for
+        # the probabilistic alternatives (bootstrap/montecarlo/bayesian).
+        self._ci_method = ci_method
         self._t0 = clock()
         # (completion_time_s, latency_ms) per LLM call — the raw material for
         # measuring the concurrency the system actually achieves.
@@ -287,6 +292,7 @@ class CostMonitorHook:
             law_cls=RobustPowerLaw,
             fit_tokens_by_stage=fit_tokens,
             fit_latency_by_stage=fit_latency,
+            ci_method=self._ci_method,
         )
         # Apply the CostMonitorAgent's live overrides (Layer 4): golden_ratio
         # is a safety margin, growth_rate_mult reacts to a sustained
@@ -319,6 +325,7 @@ class CostMonitorHook:
             fit_tokens_out_by_stage=fit_tokens_out,
             fit_latency_by_stage=fit_latency,
             fit_nonllm_by_stage=fit_nonllm,
+            ci_method=self._ci_method,
         )
         self._check_agent_trigger(duration_s)
         self._pred.predicted_total_tokens = int(est.predicted_total_tokens)

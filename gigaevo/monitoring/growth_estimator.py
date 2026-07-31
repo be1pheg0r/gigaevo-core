@@ -262,6 +262,141 @@ def tail_integral(law, values: list[float], n: float,
     return min(max(tail, 0.0), flat * cap_mult)
 
 
+def _resample_tail_totals(
+    law_cls: type, values: list[float], n: float, noise_fn, n_iter: int,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """Shared driver for the resampling-based CI methods below: refit
+    ``law_cls`` on a noised copy of ``values`` and extrapolate with
+    :func:`tail_integral`, ``n_iter`` times. ``values`` still anchors the
+    real observed sum (see tail_integral) — only the tail *shape* varies
+    across iterations, via ``fit_values``.
+    """
+    k = len(values)
+    law = law_cls.fit(values)
+    fitted = np.array([law.value_at(i) for i in range(k)])
+    resid = np.asarray(values, dtype=float) - fitted
+    base = sum(values)
+    totals = np.empty(n_iter)
+    for i in range(n_iter):
+        sim_values = list(np.maximum(fitted + noise_fn(resid, rng), 1e-6))
+        sim_law = law_cls.fit(sim_values)
+        totals[i] = base + tail_integral(sim_law, values, n, fit_values=sim_values)
+    return totals
+
+
+def tail_ci_bootstrap(
+    law_cls: type, values: list[float], n: float, *,
+    n_iter: int = 200, alpha: float = 0.1, rng: np.random.Generator | None = None,
+) -> tuple[float, float]:
+    """Residual-bootstrap CI for the anchored total (observed sum + tail).
+
+    Resamples the in-sample fit residuals with replacement, refits the
+    growth law on the perturbed series, and re-extrapolates — repeated
+    ``n_iter`` times to build an empirical distribution over the tail total,
+    then takes the ``alpha``/``1-alpha`` percentiles. No assumption on the
+    residual distribution's shape, unlike :func:`tail_ci_montecarlo`; needs
+    >=2 points to have any residuals to resample.
+    """
+    k = len(values)
+    total_point = sum(values)
+    if k < 2 or n <= k:
+        return (total_point, total_point)
+    rng = rng or np.random.default_rng(0)
+    totals = _resample_tail_totals(
+        law_cls, values, n,
+        lambda resid, r: r.choice(resid, size=len(resid), replace=True),
+        n_iter, rng)
+    lo, hi = np.percentile(totals, [100 * alpha / 2, 100 * (1 - alpha / 2)])
+    return float(max(lo, total_point)), float(max(hi, total_point))
+
+
+def tail_ci_montecarlo(
+    law_cls: type, values: list[float], n: float, *,
+    n_iter: int = 200, alpha: float = 0.1, rng: np.random.Generator | None = None,
+) -> tuple[float, float]:
+    """Parametric Monte Carlo CI: assumes in-sample residuals are i.i.d.
+    Normal(0, sigma) (sigma estimated from those residuals), draws fresh
+    Gaussian noise each iteration instead of resampling the observed
+    residuals, refits and re-extrapolates. Cheaper than the bootstrap and
+    smoother with few points, but under-covers if the true residuals are
+    skewed (token/latency buckets typically are).
+    """
+    k = len(values)
+    total_point = sum(values)
+    if k < 2 or n <= k:
+        return (total_point, total_point)
+    rng = rng or np.random.default_rng(0)
+    law0 = law_cls.fit(values)
+    fitted0 = np.array([law0.value_at(i) for i in range(k)])
+    sigma = float(np.std(np.asarray(values, dtype=float) - fitted0)) or 1e-6
+    totals = _resample_tail_totals(
+        law_cls, values, n,
+        lambda resid, r: r.normal(0.0, sigma, size=len(resid)),
+        n_iter, rng)
+    lo, hi = np.percentile(totals, [100 * alpha / 2, 100 * (1 - alpha / 2)])
+    return float(max(lo, total_point)), float(max(hi, total_point))
+
+
+def tail_ci_bayesian(
+    law_cls: type, values: list[float], n: float, *, alpha: float = 0.1,
+) -> tuple[float, float]:
+    """Closed-form Bayesian CI for the anchored total.
+
+    Normal-Inverse-Gamma conjugate posterior over the fit residual variance
+    (weak prior a0=1, b0=max(var, 1)), giving a Student-t posterior
+    predictive for the sum of the remaining tail points. Deliberately
+    conjugate/closed-form rather than MCMC — a single principled uncertainty
+    model without simulation cost — at the price of assuming Normal
+    residuals and treating the ``n - k`` future points as independent draws
+    (their variances add; no growth-law correlation between them is
+    modelled).
+    """
+    k = len(values)
+    total_point = sum(values)
+    if k < 2 or n <= k:
+        return (total_point, total_point)
+    law = law_cls.fit(values)
+    fitted = np.array([law.value_at(i) for i in range(k)])
+    resid = np.asarray(values, dtype=float) - fitted
+    a0, b0 = 1.0, max(float(np.var(resid)), 1.0)
+    a_n = a0 + k / 2.0
+    b_n = b0 + 0.5 * float(np.sum(resid ** 2))
+    remaining = n - k
+    tail_point = tail_integral(law, values, n)
+    scale = math.sqrt(b_n / a_n * (1.0 + 1.0 / k) * remaining)
+    t_crit = float(sp_stats.t.ppf(1 - alpha / 2, df=2 * a_n))
+    half = t_crit * scale
+    lo, hi = total_point + tail_point - half, total_point + tail_point + half
+    return float(max(lo, total_point)), float(hi)
+
+
+CI_METHODS = {
+    "bootstrap": tail_ci_bootstrap,
+    "montecarlo": tail_ci_montecarlo,
+    "bayesian": tail_ci_bayesian,
+}
+
+
+def relative_tail_width(ci_method: str, law_cls: type, values: list[float], n: float) -> float:
+    """Turn one of :data:`CI_METHODS`' absolute (lo, hi) bands into a
+    relative half-width comparable to :func:`confidence_width`'s role, so
+    any of the three probabilistic methods can be swapped in wherever the
+    1/sqrt(n) heuristic is used (:func:`estimate_by_stage`,
+    :func:`estimate_duration_by_stage`) without touching the surrounding
+    anchoring/tail_mult/concurrency machinery. Falls back to the heuristic
+    when there isn't enough data for the method to produce a band.
+    """
+    k = len(values)
+    if k < 2 or n <= k:
+        return confidence_width(k)
+    lo, hi = CI_METHODS[ci_method](law_cls, values, n)
+    tail_point = tail_integral(law_cls.fit(values), values, n)
+    if tail_point <= 0:
+        return confidence_width(k)
+    return float(np.clip((hi - lo) / (2 * tail_point), 0.05, 2.0))
+
+
 def confidence_width(n_points: int) -> float:
     """Relative half-width of the prediction interval. Shrinks as evidence
     accumulates; wide by default so a 1-2 point fit doesn't claim precision
@@ -321,6 +456,7 @@ def estimate_by_stage(
     law_cls: type = LinearLaw,
     fit_tokens_by_stage: dict[str, list[float]] | None = None,
     fit_latency_by_stage: dict[str, list[float]] | None = None,
+    ci_method: str | None = None,
 ) -> GrowthEstimate:
     """Same as :func:`estimate`, but fits one growth law per call stage
     (e.g. ``MutationSuggestionAgent`` vs ``MutationAgent``) instead of one
@@ -353,8 +489,12 @@ def estimate_by_stage(
         lat_law = law_cls.fit(fit_lat)
         tok_total = sum(tokens) + tail_integral(tok_law, tokens, n, fit_tok)
         lat_total_s = (sum(latency) + tail_integral(lat_law, latency, n, fit_lat)) / 1000.0
-        w_tok = confidence_width(tok_law.n_points)
-        w_lat = confidence_width(lat_law.n_points)
+        if ci_method:
+            w_tok = relative_tail_width(ci_method, law_cls, fit_tok, n)
+            w_lat = relative_tail_width(ci_method, law_cls, fit_lat, n)
+        else:
+            w_tok = confidence_width(tok_law.n_points)
+            w_lat = confidence_width(lat_law.n_points)
 
         total_tokens += tok_total
         tok_ci_lo += tok_total * (1 - w_tok)
@@ -435,6 +575,7 @@ def estimate_duration_by_stage(
     fit_tokens_out_by_stage: dict[str, list[float]] | None = None,
     fit_latency_by_stage: dict[str, list[float]] | None = None,
     fit_nonllm_by_stage: dict[str, list[float]] | None = None,
+    ci_method: str | None = None,
 ) -> tuple[float, tuple[float, float]]:
     """Predict total wall-clock duration via the TTFT+TPOT physical model
     (:func:`fit_ttft_tpot`) per stage instead of fitting latency itself as
@@ -463,10 +604,16 @@ def estimate_duration_by_stage(
     remaining-work term only — scaling the elapsed term too would let the
     agent "correct" wall time that has already been measured.
 
+    ``ci_method``: swaps the 1/sqrt(n) heuristic width for one of
+    :data:`CI_METHODS` (via :func:`relative_tail_width`), weighted by each
+    stage's share of the remaining service time. ``None`` (default) keeps
+    the exact original heuristic behaviour.
+
     Returns ``(duration_s, (ci_low_s, ci_high_s))``.
     """
     remaining_ms = 0.0
     n_points = 0
+    weighted_w_num = 0.0  # sum(w_stage * remaining_ms_stage), only used if ci_method
 
     for stage, tokens_out in tokens_out_by_stage.items():
         latency = latency_by_stage.get(stage, [])
@@ -484,17 +631,23 @@ def estimate_duration_by_stage(
         # on real logs. Both are physically non-negative.
         ttft, tpot = max(ttft, 0.0), max(tpot, 0.0)
         tail_out = tail_integral(token_law_cls.fit(fit_out), tokens_out, n, fit_out)
-        remaining_ms += ttft * (n - k) + tpot * tail_out
+        stage_remaining_ms = ttft * (n - k) + tpot * tail_out
+        remaining_ms += stage_remaining_ms
+        if ci_method:
+            weighted_w_num += relative_tail_width(ci_method, token_law_cls, fit_out, n) * stage_remaining_ms
 
     for stage, durations in (nonllm_duration_by_stage or {}).items():
         n = total_units_by_stage.get(stage, len(durations))
         fit_dur = (fit_nonllm_by_stage or {}).get(stage, durations)
-        remaining_ms += tail_integral(nonllm_law_cls.fit(fit_dur), durations, n, fit_dur)
+        stage_remaining_ms = tail_integral(nonllm_law_cls.fit(fit_dur), durations, n, fit_dur)
+        remaining_ms += stage_remaining_ms
         n_points += len(durations)
+        if ci_method:
+            weighted_w_num += relative_tail_width(ci_method, nonllm_law_cls, fit_dur, n) * stage_remaining_ms
 
     conc = concurrency if concurrency and concurrency > 0 else max(max_in_flight, 1)
     duration_s = max(0.0, elapsed_s + remaining_ms * tail_mult / 1000.0 / conc)
-    w = confidence_width(n_points)
+    w = (weighted_w_num / remaining_ms) if (ci_method and remaining_ms > 0) else confidence_width(n_points)
     # Only the predicted part carries uncertainty; elapsed time is measured.
     half = (duration_s - elapsed_s) * w
     return duration_s, (duration_s - half, duration_s + half)
