@@ -29,6 +29,9 @@ import statistics as st
 import sys
 from pathlib import Path
 
+# Running a script puts its own directory on sys.path, not the cwd — so the
+# repo root has to be added explicitly or `gigaevo` is invisible.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from replay_from_log import replay_log  # noqa: E402
 

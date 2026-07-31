@@ -34,6 +34,10 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+# Script execution puts this file's directory on sys.path, not the cwd, so the
+# repo root has to be added explicitly for the documented `python3
+# tools/cost_ablation/replay_from_log.py ...` invocation to find `gigaevo`.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from build_report import build_error_decay_png, build_table_png, build_table_tex  # noqa: E402
 
