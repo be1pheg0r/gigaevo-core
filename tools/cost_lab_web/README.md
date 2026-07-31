@@ -16,14 +16,39 @@ Port 8091 by default (`COST_LAB_PORT` to change it).
 
 ## Reach it from your laptop
 
-The server's firewall only lets 80/443/8080 through, so tunnel it:
+<http://82.202.156.206:8080/costlab/> — no tunnel needed.
 
-```bash
-ssh -N -L 8091:127.0.0.1:8091 User10@82.202.156.206
+The firewall only lets 80/443/8080 through, so the console is published by
+the same user-owned nginx that fronts the 35B model (`~/nginx.conf`, runs as
+User10, no sudo involved), alongside `/taskbuilder/` and `/grafana/`:
+
+```nginx
+location = /costlab { return 301 /costlab/; }
+location /costlab/ {
+    proxy_pass http://127.0.0.1:8091/;
+    ...
+}
 ```
 
-Then open <http://127.0.0.1:8091/>. Leave that command running; it is the
-whole connection.
+`proxy_pass` with the trailing slash strips the prefix, so the page asks for
+`api/…` and `static/…` relative to itself and works both here and at the
+root. The redirect exists to guarantee the trailing slash those relative
+URLs need.
+
+After editing `~/nginx.conf`, always:
+
+```bash
+~/envs/nginx/sbin/nginx -p /home/User10/envs/nginx -c /home/User10/nginx.conf -t   # must pass
+~/envs/nginx/sbin/nginx -p /home/User10/envs/nginx -c /home/User10/nginx.conf -s reload
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/health              # LLM must still answer
+```
+
+That nginx serves the model for the whole summer school — reload, never
+restart, and check `/health` afterwards. Backups are kept as
+`~/nginx.conf.bak.<timestamp>`.
+
+If nginx is ever down, the tunnel still works as a fallback:
+`ssh -N -L 8091:127.0.0.1:8091 User10@82.202.156.206` → <http://127.0.0.1:8091/>.
 
 ## The three views
 
