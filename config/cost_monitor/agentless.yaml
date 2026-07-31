@@ -1,0 +1,25 @@
+# @package _global_
+#
+# Ablation variant of cost_monitor/enabled.yaml: the growth-law
+# CostMonitorHook + CostPrediction still run and still emit
+# [CostMonitorHookJSON] predictions, but cost_monitor_agent is a
+# NoOpCostMonitorAgent — acall_llm never calls a real LLM, so no
+# cold_start_factor / golden_ratio / growth_rate_mult adjustments are ever
+# applied. Use this to produce an "agent disabled" baseline to compare
+# against `+cost_monitor=enabled` runs.
+#
+#   python run.py problem.name=heilbron +cost_monitor=agentless
+
+cost_prediction:
+  _target_: gigaevo.monitoring.cost_predictor.CostPrediction
+  max_mutants: ${max_mutants}
+  max_in_flight: ${max_in_flight}
+
+cost_monitor_agent:
+  _target_: gigaevo.llm.agents.cost_monitor.NoOpCostMonitorAgent
+
+post_step_hook:
+  _target_: gigaevo.monitoring.cost_monitor_hook.CostMonitorHook
+  agent: ${cost_monitor_agent}
+  prediction: ${cost_prediction}
+  interval: 5

@@ -15,12 +15,31 @@ from gigaevo.llm.agents.cost_monitor import (
 )
 from gigaevo.monitoring.cost_predictor import CostPrediction
 from gigaevo.monitoring.emit import emit, subscribe
-from gigaevo.monitoring.events import CostAgentAdjustment, LLMCall, MutationAttempted
+from gigaevo.monitoring.events import BackpressureSample, CostAgentAdjustment, LLMCall, MutationAttempted, StageExec
 from gigaevo.monitoring.growth_estimator import (
     RobustPowerLaw,
     estimate_by_stage,
     estimate_duration_by_stage,
 )
+
+
+def _clamp_step(current: float, proposed: float, max_rel_step: float = 0.3) -> float:
+    """Limit how far one calibration call can move a multiplier relative to
+    its current value — caps the blast radius of a single (possibly wrong)
+    LLM judgment call, instead of letting it jump anywhere in the full
+    accepted range (0.5–2.0 golden / 0.3–3.0 growth) in one step."""
+    lo, hi = current * (1 - max_rel_step), current * (1 + max_rel_step)
+    return max(lo, min(hi, proposed))
+
+
+# Non-LLM pipeline stages whose wall-clock time the LLM-latency duration
+# model is otherwise blind to. Named explicitly (rather than "everything
+# that isn't an LLM stage") so the growth-law fit only sees stages known to
+# be real, recurring per-mutant cost — see estimate_duration_by_stage's
+# nonllm_duration_by_stage docstring for the historical evidence.
+NON_LLM_DURATION_STAGES = frozenset({
+    "CallProgramFunction", "CallValidatorFunction", "IntraMemoryStage",
+})
 
 
 class CostMonitorHook:
@@ -58,6 +77,14 @@ class CostMonitorHook:
         self._attempts = 0
         subscribe(LLMCall.event, self._on_llm_call)
         subscribe(MutationAttempted.event, self._on_mutation_attempted)
+        subscribe(BackpressureSample.event, self._on_backpressure_sample)
+        subscribe(StageExec.event, self._on_stage_exec)
+        self._last_bp: BackpressureSample | None = None
+        # Same drain-on-flush pattern as _call_history/_history_flush_idx,
+        # but for non-LLM stage wall-clock time (see NON_LLM_DURATION_STAGES).
+        self._stage_exec_history: list[tuple[str, float]] = []
+        self._nonllm_flush_idx = 0
+        self._nonllm_duration_by_stage: dict[str, list[float]] = {}
 
     def _on_llm_call(self, event: LLMCall) -> None:
         """Live subscriber — feeds every real LLM call into the history."""
@@ -66,6 +93,15 @@ class CostMonitorHook:
     def _on_mutation_attempted(self, event: MutationAttempted) -> None:
         self._attempts += 1
         self._flush_mutant_bucket()
+
+    def _on_backpressure_sample(self, event: BackpressureSample) -> None:
+        self._last_bp = event
+
+    def _on_stage_exec(self, event: StageExec) -> None:
+        # A cache "hit" returns near-instantly and isn't representative of
+        # future cost for that stage — only count real executions.
+        if event.stage in NON_LLM_DURATION_STAGES and event.decision != "hit":
+            self._stage_exec_history.append((event.stage, event.duration_ms))
 
     def _flush_mutant_bucket(self) -> None:
         """Sum calls since the last flush per stage, refit the growth law,
@@ -92,6 +128,15 @@ class CostMonitorHook:
             self._tokens_out_by_stage.setdefault(stage, []).append(stage_tokens_out[stage])
             self._latency_by_stage.setdefault(stage, []).append(stage_latency[stage])
 
+        new_stage_execs = self._stage_exec_history[self._nonllm_flush_idx:]
+        self._nonllm_flush_idx = len(self._stage_exec_history)
+        if new_stage_execs:
+            nonllm_stage_totals: dict[str, float] = {}
+            for stage, duration_ms in new_stage_execs:
+                nonllm_stage_totals[stage] = nonllm_stage_totals.get(stage, 0.0) + duration_ms
+            for stage, total_ms in nonllm_stage_totals.items():
+                self._nonllm_duration_by_stage.setdefault(stage, []).append(total_ms)
+
         # Extrapolate each stage's total firing count from its observed
         # rate-per-attempt so far (some stages skip-cascade and don't fire
         # on every attempt — see lineage_memory_pipeline.py archive gating).
@@ -105,6 +150,10 @@ class CostMonitorHook:
             stage: max(1, round(self._pred.max_mutants * len(series) / max(self._attempts, 1)))
             for stage, series in self._tokens_by_stage.items()
         }
+        total_units_by_stage.update({
+            stage: max(1, round(self._pred.max_mutants * len(series) / max(self._attempts, 1)))
+            for stage, series in self._nonllm_duration_by_stage.items()
+        })
         est = estimate_by_stage(
             self._tokens_by_stage, self._latency_by_stage,
             total_units_by_stage=total_units_by_stage,
@@ -118,7 +167,20 @@ class CostMonitorHook:
             self._tokens_out_by_stage, self._latency_by_stage,
             total_units_by_stage=total_units_by_stage,
             max_in_flight=self._pred.max_in_flight,
+            nonllm_duration_by_stage=self._nonllm_duration_by_stage,
         )
+        # Apply the CostMonitorAgent's live overrides (Layer 4) to the
+        # growth-law duration estimate: golden_ratio is a safety margin,
+        # growth_rate_mult reacts to a sustained size/latency trend the
+        # agent detected. Sentinel -1 (out of range) means no change.
+        llm_mult = 1.0
+        if 0.5 <= self._pred.llm_golden_override <= 2.0:
+            llm_mult *= self._pred.llm_golden_override
+        if 0.3 <= self._pred.llm_growth_override <= 3.0:
+            llm_mult *= self._pred.llm_growth_override
+        if llm_mult != 1.0:
+            duration_s *= llm_mult
+            duration_ci = (duration_ci[0] * llm_mult, duration_ci[1] * llm_mult)
         self._pred.predicted_total_tokens = int(est.predicted_total_tokens)
         self._pred.predicted_duration_s = duration_s
         self._pred.token_ci_low, self._pred.token_ci_high = (
@@ -148,13 +210,26 @@ class CostMonitorHook:
         if self._counter % self._interval != 0:
             return
 
-        # Build tool context
+        # Build tool context from real live state, not fixed placeholders —
+        # previously the agent always saw cold=0.57/golden=1.1/growth=1.0 and
+        # backpressure_util=0.8 regardless of what was actually happening, so
+        # its transient-vs-regime-change judgment was made half-blind.
+        current_golden = self._pred.llm_golden_override if self._pred.llm_golden_override > 0 else 1.0
+        current_growth = self._pred.llm_growth_override if self._pred.llm_growth_override > 0 else 1.0
+        current_cold = self._pred.llm_cold_override if self._pred.llm_cold_override > 0 else 0.57
+        if self._last_bp is not None:
+            bp_util = self._last_bp.in_flight / self._last_bp.max_in_flight
+            bp_in_flight, bp_max_in_flight = self._last_bp.in_flight, self._last_bp.max_in_flight
+        else:
+            bp_util, bp_in_flight, bp_max_in_flight = 0.8, 0, 8
         tools = _ToolSet(
             recent_calls=self._call_history[-20:],
-            backpressure_util=0.8,
-            current_cold=0.57,
-            current_golden=1.1,
-            current_growth=1.0,
+            backpressure_util=bp_util,
+            in_flight=bp_in_flight,
+            max_in_flight=bp_max_in_flight,
+            current_cold=current_cold,
+            current_golden=current_golden,
+            current_growth=current_growth,
         )
         self._agent.tools = tools
 
@@ -176,9 +251,9 @@ class CostMonitorHook:
                 if cold > 0:
                     self._pred.llm_cold_override = cold
                 if golden > 0:
-                    self._pred.llm_golden_override = golden
+                    self._pred.llm_golden_override = _clamp_step(current_golden, golden)
                 if growth > 0:
-                    self._pred.llm_growth_override = growth
+                    self._pred.llm_growth_override = _clamp_step(current_growth, growth)
                 if reasoning:
                     self._pred.llm_reasoning = reasoning
 

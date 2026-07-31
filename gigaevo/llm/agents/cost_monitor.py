@@ -315,3 +315,30 @@ class CostMonitorAgent(LangGraphAgent):
             "reasoning": reasoning,
         }
         return state
+
+# ── No-op agent for ablation studies ────────────────────────────────────────
+
+class _DummyResponse:
+    """Minimal stand-in for an AIMessage — only `.content` is read downstream."""
+
+    content: str = "{}"
+
+
+class NoOpCostMonitorAgent(CostMonitorAgent):
+    """Same build_prompt/parse_response path as CostMonitorAgent, but
+    ``acall_llm`` never calls a real LLM — it returns an empty-JSON response.
+
+    Used for the "without agent" ablation: CostMonitorHook still runs and
+    still logs growth-law predictions ([CostMonitorHookJSON]), but no LLM
+    call is made and no cost-model parameters are ever adjusted (parse_response
+    reads all fields as -1/absent from "{}", which CostMonitorHook treats as
+    "no change" — see the `if cold > 0` / `if golden > 0` / `if growth > 0`
+    guards in CostMonitorHook.__call__).
+    """
+
+    def __init__(self):
+        super().__init__(llm=None)
+
+    async def acall_llm(self, state: dict) -> dict:
+        state["llm_response"] = _DummyResponse()
+        return state

@@ -324,12 +324,24 @@ def estimate_duration_by_stage(
     total_units_by_stage: dict[str, int],
     max_in_flight: int,
     token_law_cls: type = RobustPowerLaw,
+    nonllm_duration_by_stage: dict[str, list[float]] | None = None,
+    nonllm_law_cls: type = RobustPowerLaw,
 ) -> tuple[float, tuple[float, float]]:
     """Predict total wall-clock duration via the TTFT+TPOT physical model
     (:func:`fit_ttft_tpot`) per stage instead of fitting latency itself as
     a growth law over call index — latency doesn't follow a growth trend
     in this system (dominated by backpressure noise, r≈0.23 with call
     index vs r≈0.57 with tokens_out); see :func:`fit_ttft_tpot`.
+
+    ``nonllm_duration_by_stage``: bucketed wall-clock duration_ms for
+    non-LLM pipeline stages (e.g. CallValidatorFunction, CallProgramFunction)
+    that the LLM-latency model above never sees. Historical validation
+    (2026-07-27 cost-model report, 21 real runs) found these dominate 42-94%
+    of wall time on some tasks, and LLM-latency-only duration estimates
+    underestimate systematically as a result (-33% median bias measured
+    there). Fit directly as a growth law over duration_ms (no tokens_out
+    concept applies to a validator/executor stage) and folded into the same
+    Little's Law division as the LLM contribution below, not a second one.
 
     Returns ``(duration_s, (ci_low_s, ci_high_s))``.
     """
@@ -347,6 +359,12 @@ def estimate_duration_by_stage(
 
         total_latency_ms += (ttft + tpot * mean_tok_out) * n
         n_points += len(tokens_out)
+
+    for stage, durations in (nonllm_duration_by_stage or {}).items():
+        n = total_units_by_stage.get(stage, len(durations))
+        law = nonllm_law_cls.fit(durations)
+        total_latency_ms += _bounded_integral(law, durations, n)
+        n_points += len(durations)
 
     duration_s = max(0.0, total_latency_ms / 1000.0 / max(max_in_flight, 1))
     w = confidence_width(n_points)

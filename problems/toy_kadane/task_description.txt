@@ -1,8 +1,8 @@
 **OBJECTIVE**: Write a Python function that finds the **maximum sum of a contiguous subarray** in a given list of integers.
 
-**INPUT**: The function receives a list of integers (positive and negative).
+**INPUT**: The returned solver receives a list of integers (positive and negative).
 
-**OUTPUT**: Return a single integer — the maximum contiguous subarray sum.
+**OUTPUT**: The solver returns a single integer — the maximum contiguous subarray sum.
 
 **EXAMPLES**:
 - `[-2, 1, -3, 4, -1, 2, 1, -5, 4]` → `6` (subarray `[4, -1, 2, 1]`)
@@ -18,9 +18,13 @@
 
 **HINT**: Kadane's algorithm solves this in O(n) time.
 
+**CONTRACT — READ CAREFULLY**: `entrypoint` is called with **zero arguments** by the runtime. It must build and return a solver function (a closure); the runtime then calls that returned function once per test case with a `nums: list[int]` argument. Do NOT change `entrypoint`'s own signature to take `nums` directly — it never receives it, and doing so will crash immediately with a TypeError before any test case runs.
+
 OUTPUT:
 ```python
-def entrypoint(nums: list[int]) -> int:
-    # Your implementation here
-    return result
+def entrypoint():
+    def solve(nums: list[int]) -> int:
+        # Your implementation here
+        return result
+    return solve
 ```
