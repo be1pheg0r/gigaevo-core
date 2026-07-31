@@ -1414,10 +1414,14 @@ function stabilityRow(run, metric) {
     if (actual && hi > lo) { n += 1; if (actual >= lo && actual <= hi) covered += 1; }
     prev = { lo, hi };
   }
+  const last = s[s.length - 1] || {};
   return {
     run, points: s.length,
     breach: s.length > 1 ? (breaches / (s.length - 1)) * 100 : null,
     coverage: n ? (covered / n) * 100 : null,
+    // >1 means the run had to widen its own interval to stop being surprised,
+    // <1 that it was too cautious. Absent on runs logged before calibration.
+    aciScale: last.aci_scale ?? null,
   };
 }
 
@@ -1440,7 +1444,8 @@ function stabilityBlock(runs) {
 
   const t = el("table", "grid-table");
   t.innerHTML = "<thead><tr><th>Прогон</th><th>Условие</th><th>Точек</th>"
-    + "<th>Пробитий своего интервала</th><th>Покрытие факта интервалом</th></tr></thead>";
+    + "<th>Пробитий своего интервала</th><th>Покрытие факта интервалом</th>"
+    + "<th>Ширина к концу</th></tr></thead>";
   const tb = el("tbody");
   for (const r of rows.sort((a, b) => (b.breach ?? 0) - (a.breach ?? 0))) {
     const tr = el("tr");
@@ -1453,6 +1458,15 @@ function stabilityBlock(runs) {
     const c = el("td", "num", r.coverage == null ? "—" : `${r.coverage.toFixed(0)}%`);
     if (r.coverage != null) c.classList.add(r.coverage >= 60 ? "win" : "loss");
     tr.append(c);
+    const a = el("td", "num", r.aciScale == null ? "—" : `×${r.aciScale.toFixed(2)}`);
+    if (r.aciScale != null) {
+      a.title = r.aciScale > 1.05
+        ? "прогон расширял собственный интервал: модельная ширина была слишком оптимистична"
+        : r.aciScale < 0.95
+          ? "прогон сужал интервал: модельная ширина была избыточно осторожной"
+          : "модельная ширина оказалась примерно верной";
+    }
+    tr.append(a);
     tb.append(tr);
   }
   t.append(tb);
