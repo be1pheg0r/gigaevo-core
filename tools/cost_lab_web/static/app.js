@@ -471,9 +471,12 @@ function renderBudgetAnswer() {
       `<div class="reach__hint">Бюджет меньше того, что ушло на саму прикидку — ` +
       `эти токены уже потрачены и не вернутся.</div>`;
   } else {
+    // A range takes the genitive plural ("на 412–651 мутаций"); agreeing with
+    // the last numeral instead gives "на 412–651 мутацию", which is nonsense.
     const span = nLo === nHi ? `${nLo}` : `${nLo}–${nHi}`;
+    const noun = nLo === nHi ? plural(nLo, "мутацию", "мутации", "мутаций") : "мутаций";
     reach.innerHTML =
-      `<div class="reach__num">хватит на <b>${span}</b> ${plural(nHi, "мутацию", "мутации", "мутаций")}</div>` +
+      `<div class="reach__num">хватит на <b>${span}</b> ${noun}</div>` +
       `<div class="reach__hint">Медиана и верхний квартиль стоимости: ` +
       `нижний край — если прогон окажется дороже обычного.</div>`;
   }
