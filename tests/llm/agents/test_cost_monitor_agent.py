@@ -106,3 +106,24 @@ class TestOutlierMarkerTracksLatency:
         assert "Already flagged this run: [2]" in table
         # and it must not also be offered as a fresh spike
         assert "SLOW" not in table
+
+
+class TestAgentIsShownItsScoreboard:
+    """The agent is woken BY a miscoverage event; without knowing how often
+    that happens it cannot tell a real regime change from routine noise."""
+
+    def test_a_high_rate_is_reported_as_the_interval_being_too_narrow(self) -> None:
+        t = _tools(miscoverage_rate=0.35, miscoverage_target=0.10, width_scale=1.4)
+        text = _agent(t).build_prompt({"messages": []})[1].content
+        assert "35% of the time" in text
+        assert "too narrow" in text
+        assert "x1.40" in text
+
+    def test_a_rate_on_target_says_so(self) -> None:
+        assert "about right" in _tools(miscoverage_rate=0.11).get_calibration()
+
+    def test_a_low_rate_reads_as_a_generous_interval(self) -> None:
+        assert "generous" in _tools(miscoverage_rate=0.01).get_calibration()
+
+    def test_no_history_does_not_invent_one(self) -> None:
+        assert "no calibration history" in _tools().get_calibration()

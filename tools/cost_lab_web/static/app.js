@@ -49,6 +49,7 @@ const TOOL_RU = {
   get_model_params: "get_model_params — текущие коэффициенты",
   get_last_adjustment_outcome: "get_last_adjustment_outcome — чем кончилась прошлая правка",
   get_recent_calls: "get_recent_calls — последние вызовы LLM",
+  get_calibration: "get_calibration — как часто оценка промахивается мимо своего интервала",
 };
 const ACTION_RU = {
   adjust_model: "adjust_model",
@@ -969,7 +970,9 @@ function checkpointTable(paired) {
  *  `CostMonitorAgent.build_prompt` does not actually inline into the prompt.
  *  The trace logs all six (`_log_agent_trace` calls them itself), so the
  *  console would otherwise present evidence the model never saw. */
-const TOOLS_IN_PROMPT = new Set(["get_recent_calls", "get_backpressure", "get_model_params", "get_program_diff"]);
+const TOOLS_IN_PROMPT = new Set(["get_recent_calls", "get_backpressure", "get_model_params",
+  "get_program_diff", "get_trigger", "get_progress", "get_last_adjustment_outcome",
+  "get_calibration"]);
 
 /** Signed error at the checkpoint nearest this wakeup, and `lookahead`
  *  further on — the crude before/after any single intervention gets. */

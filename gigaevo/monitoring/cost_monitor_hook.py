@@ -622,6 +622,9 @@ class CostMonitorHook:
             trigger_reason=trigger,
             last_adjustment=self._last_adjustment,
             already_flagged=sorted(self._flagged_calls),
+            miscoverage_rate=(self._miscoverages / self._flushes) if self._flushes else None,
+            miscoverage_target=self._aci_alpha,
+            width_scale=self._aci_scale,
         )
         self._agent.tools = tools
 
@@ -747,6 +750,7 @@ class CostMonitorHook:
                 "reasoning": adjustments.get("reasoning", ""),
                 "evidence": {
                     "get_trigger": _safe(tools.get_trigger),
+                    "get_calibration": _safe(tools.get_calibration),
                     "get_progress": _safe(tools.get_progress),
                     "get_backpressure": _safe(tools.get_backpressure),
                     "get_model_params": _safe(tools.get_model_params),

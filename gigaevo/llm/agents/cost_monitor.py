@@ -151,6 +151,9 @@ class _ToolSet:
         trigger_reason: str = "",
         last_adjustment: dict[str, Any] | None = None,
         already_flagged: list[int] | None = None,
+        miscoverage_rate: float | None = None,
+        miscoverage_target: float = 0.10,
+        width_scale: float = 1.0,
     ):
         self._calls = recent_calls
         self._diff = program_diff
@@ -171,8 +174,32 @@ class _ToolSet:
         self._trigger = trigger_reason
         self._last_adj = last_adjustment
         self._flagged = set(already_flagged or ())
+        self._miscov = miscoverage_rate
+        self._miscov_target = miscoverage_target
+        self._width_scale = width_scale
         # Accumulated adjustments
         self.adjustments: dict[str, Any] = {}
+
+    def get_calibration(self) -> str:
+        """How often the estimator has been surprising itself, against target.
+
+        The agent is woken BY a miscoverage event, so this is the scoreboard
+        for the loop it sits in — without it the agent is asked to judge one
+        event with no idea whether such events are rare or constant.
+        """
+        if self._miscov is None:
+            return "(no calibration history yet)"
+        state = ("about right" if abs(self._miscov - self._miscov_target) < 0.05
+                 else "too often — the interval has been too narrow"
+                 if self._miscov > self._miscov_target
+                 else "rarely — the interval has been generous")
+        return (
+            f"the estimate has landed outside its own previous interval "
+            f"{self._miscov:.0%} of the time (target {self._miscov_target:.0%}): {state}. "
+            f"The interval width is currently x{self._width_scale:.2f} of the model's own "
+            f"estimate, adjusted automatically. Being woken is not itself proof that "
+            f"something changed."
+        )
 
     # ── Observability tools ────────────────────────────────────────────────
 
@@ -379,6 +406,7 @@ class CostMonitorAgent(LangGraphAgent):
 
         context = (
             f"WHY YOU ARE AWAKE\n{tools.get_trigger()}\n\n"
+            f"HOW OFTEN THIS HAPPENS\n{tools.get_calibration()}\n\n"
             f"RUN PROGRESS\n{tools.get_progress()}\n\n"
             f"YOUR PREVIOUS DECISION\n{tools.get_last_adjustment_outcome()}\n\n"
             f"RECENT LLM CALLS\n{tools.get_recent_calls(15)}\n\n"
