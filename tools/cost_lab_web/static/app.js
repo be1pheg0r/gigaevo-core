@@ -166,8 +166,12 @@ function toast(msg, bad = false) {
 
 /* ───────────────────────────────────────────────────────── api ── */
 
+/* Paths are written with a leading slash for readability but requested
+   relative to the page, so the same build works served at the root and
+   behind nginx's `location /costlab/` (which strips the prefix). Relies on
+   the page URL ending in a slash — nginx redirects /costlab to /costlab/. */
 const api = async (path, opts) => {
-  const r = await fetch(path, opts);
+  const r = await fetch(path.replace(/^\//, ""), opts);
   if (!r.ok) throw new Error((await r.text()).slice(0, 300));
   return r.json();
 };
