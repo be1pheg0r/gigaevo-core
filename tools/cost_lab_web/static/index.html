@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en" data-view="launch">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cost Lab — gigaevo forecast console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@100,400;100,600;125,700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <a class="wordmark" href="#" data-goto="launch">
+    <span class="wordmark__band" aria-hidden="true"></span>
+    <span class="wordmark__text">Cost<em>Lab</em></span>
+  </a>
+
+  <div class="repo" id="repo">
+    <span class="repo__skeleton">reading repository…</span>
+  </div>
+
+  <nav class="views" role="tablist" aria-label="Views">
+    <button role="tab" data-goto="launch" aria-selected="true">Launch</button>
+    <button role="tab" data-goto="live" aria-selected="false">Live</button>
+    <button role="tab" data-goto="analyze" aria-selected="false">Analyze</button>
+  </nav>
+</header>
+
+<div class="shell">
+
+  <aside class="rail">
+    <div class="rail__head">
+      <h2>Experiments</h2>
+      <button class="ghost" id="refresh-experiments" title="Reload the list">Reload</button>
+    </div>
+    <ol class="explist" id="explist"><li class="explist__empty">Loading…</li></ol>
+  </aside>
+
+  <main class="stage">
+
+    <!-- ─────────────────────────────────────────── LAUNCH ── -->
+    <section class="view" data-view="launch">
+      <div class="masthead">
+        <p class="eyebrow">Ablation</p>
+        <h1>Run the estimator against itself.</h1>
+        <p class="lede">
+          Every task launches twice — once with the automatic estimator alone,
+          once with CostMonitorAgent allowed to reach in and move its levers.
+          Same task, same seeds, same wave. The difference is the agent.
+        </p>
+      </div>
+
+      <div class="launch-grid">
+        <div class="panel panel--tasks">
+          <div class="panel__head">
+            <h3>Tasks</h3>
+            <div class="chipbar" id="familybar"></div>
+          </div>
+          <div class="tasklist" id="tasklist"></div>
+        </div>
+
+        <div class="panel panel--params">
+          <div class="panel__head"><h3>Parameters</h3></div>
+
+          <label class="field">
+            <span class="field__label">Mutation attempts per run</span>
+            <input type="range" id="max-mutants" min="10" max="300" step="10" value="100">
+            <output class="field__out mono" id="max-mutants-out">100</output>
+            <span class="field__hint">The cap is on attempts, not accepted mutants.</span>
+          </label>
+
+          <label class="field">
+            <span class="field__label">Tasks per wave</span>
+            <input type="range" id="wave-size" min="1" max="8" step="1" value="3">
+            <output class="field__out mono" id="wave-size-out">3</output>
+            <span class="field__hint">Each task holds two runs. Oversubscribing the 24 LLM slots
+              queues calls and skews the concurrency the duration model measures.</span>
+          </label>
+
+          <label class="field field--inline">
+            <span class="field__label">Model pool</span>
+            <select id="llm">
+              <option value="summer_school_servers">summer_school_servers — 9B + 35B-A3B</option>
+              <option value="summer_school_27b">summer_school_27b — 27B dense</option>
+            </select>
+          </label>
+
+          <label class="field field--inline">
+            <span class="field__label">Label</span>
+            <input type="text" id="label" placeholder="alphaevolve" maxlength="40">
+          </label>
+
+          <div class="ledger" id="ledger"></div>
+
+          <button class="primary" id="start">Start experiment</button>
+          <p class="launch-note" id="launch-note"></p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ───────────────────────────────────────────── LIVE ── -->
+    <section class="view" data-view="live">
+      <div class="view__head">
+        <div>
+          <p class="eyebrow" id="live-eyebrow">No experiment selected</p>
+          <h2 id="live-title">Live</h2>
+        </div>
+        <div class="view__actions">
+          <label class="toggle"><input type="checkbox" id="autorefresh" checked><span>Auto-refresh</span></label>
+          <button class="ghost danger" id="stop-exp">Stop runs</button>
+        </div>
+      </div>
+      <div class="runs" id="runs"></div>
+    </section>
+
+    <!-- ────────────────────────────────────────── ANALYZE ── -->
+    <section class="view" data-view="analyze">
+      <div class="view__head">
+        <div>
+          <p class="eyebrow" id="an-eyebrow">No experiment selected</p>
+          <h2 id="an-title">Analyze</h2>
+        </div>
+        <div class="view__actions">
+          <div class="segmented" id="metric-switch" role="group" aria-label="Metric">
+            <button data-metric="duration" class="is-on">Duration</button>
+            <button data-metric="tokens">Tokens</button>
+          </div>
+          <button class="ghost" id="build-report">Build PNG report</button>
+        </div>
+      </div>
+
+      <div id="analysis"></div>
+    </section>
+
+  </main>
+</div>
+
+<div class="tooltip" id="tooltip" hidden></div>
+<div class="toast" id="toast" hidden></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
