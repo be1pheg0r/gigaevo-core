@@ -36,6 +36,27 @@ To sanity-check the log parser without launching anything:
 python3 tools/cost_ablation/build_report.py --selftest
 ```
 
+## Checking the prediction math against old logs — no evolution run needed
+
+`replay_from_log.py` feeds a log's own `[LLM_CALL]`/`[STAGE_EXEC]`/
+`[MUTATION_ATTEMPTED]` lines through a fresh `CostMonitorHook` running the
+**currently installed** code, and compares the result against that log's
+own actual tokens/duration. Use this to check whether a change to
+`growth_estimator.py` / `cost_monitor_hook.py` would have predicted better
+on data you already have, without spending any LLM budget or wall-clock
+time re-running evolution:
+
+```bash
+python3 tools/cost_ablation/replay_from_log.py experiments/*/*.log
+python3 tools/cost_ablation/replay_from_log.py --out-dir experiments/replay_check path/to/one.log
+```
+
+Scope: this only replays the deterministic part of the pipeline (static
+baseline + growth-law fit + non-LLM stage duration). It does **not** replay
+`CostMonitorAgent`'s LLM-driven calibration cycle (golden/growth overrides)
+— that needs a real LLM call each time and can't be reproduced from a log;
+use `run_ablation.py` for a genuine with-agent comparison.
+
 ## Known gotchas (carried over from the 2026-07-31 session)
 
 - Redis db must be 0-127 (this server has 128 logical dbs) — db≥128 crashes
