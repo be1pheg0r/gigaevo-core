@@ -200,6 +200,117 @@ def build_error_decay_png(rows_by_task: dict[str, dict[str, dict]], out_path: Pa
     plt.close(fig)
 
 
+GRID = [round(0.05 * i, 2) for i in range(1, 21)]  # 5%, 10%, ... 100%
+
+
+def err_at(s: dict, p: float, field: str) -> float:
+    """Signed % error of ``field`` at run progress ``p`` (0..1].
+
+    Progress is share of the run's own prediction points, so conditions that
+    emitted different numbers of points are still compared at the same stage
+    of the run rather than at the same list index.
+    """
+    series = s["series"]
+    i = min(len(series) - 1, max(0, int(round(p * len(series))) - 1))
+    actual = s["actual_duration"] if field == "predicted_duration_s" else s["actual_tokens"]
+    return (series[i][field] - actual) / actual * 100
+
+
+def build_progress_grid(rows_by_task: dict[str, dict[str, dict]], out_dir: Path) -> None:
+    """Error-vs-progress grid: the headline comparison, table + figure.
+
+    CSV holds every (task, condition, progress) cell; the figure shows the
+    median |error| across tasks, which is what the run-level claim rests on
+    (mean is hostage to a single cold-start outlier).
+    """
+    import csv
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    fields = [("predicted_duration_s", "duration"), ("predicted_tokens", "tokens")]
+
+    with open(out_dir / "progress_grid.csv", "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["task", "condition", "progress", "metric", "signed_err_pct", "abs_err_pct"])
+        for key, conds in rows_by_task.items():
+            for cond, s in conds.items():
+                for field, label in fields:
+                    for p in GRID:
+                        e = err_at(s, p, field)
+                        w.writerow([key, cond, f"{p:.2f}", label, f"{e:.2f}", f"{abs(e):.2f}"])
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+    colors = {"noagent": "#8b96a3", "withagent": "#2a9d5c"}
+    for ax, (field, label) in zip(axes, fields):
+        for cond in ("noagent", "withagent"):
+            series = [[abs(err_at(s, p, field)) for p in GRID]
+                      for conds in rows_by_task.values() if (s := conds.get(cond))]
+            if not series:
+                continue
+            arr = np.array(series)
+            med = np.median(arr, axis=0)
+            ax.plot([p * 100 for p in GRID], med, color=colors[cond], linewidth=2.2,
+                    marker="o", markersize=4, label=f"{COND_LABEL[cond]} (n={len(series)})",
+                    linestyle="-" if cond == "withagent" else (0, (4, 2)))
+            ax.fill_between([p * 100 for p in GRID],
+                            np.percentile(arr, 25, axis=0), np.percentile(arr, 75, axis=0),
+                            color=colors[cond], alpha=0.13)
+        ax.axhline(10, color="#c0c0c0", linestyle=":", linewidth=1)
+        ax.set_xlabel("run progress, %")
+        ax.set_ylabel(f"|{label} prediction error|, %")
+        ax.set_title(f"{label.capitalize()} error vs progress (median, IQR band)",
+                     fontsize=11, fontweight="bold")
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=9)
+    fig.suptitle("Automatic estimator vs estimator + CostMonitorAgent, alphaevolve tasks", fontsize=13)
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    fig.savefig(out_dir / "error_vs_progress.png", dpi=160)
+    plt.close(fig)
+
+
+def build_grid_table_png(rows_by_task: dict[str, dict[str, dict]], out_dir: Path) -> None:
+    """Median |error| per checkpoint as a compact two-row-per-metric table."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    checkpoints = [0.05, 0.1, 0.15, 0.25, 0.5, 0.75, 1.0]
+    header = ["Metric", "Condition"] + [f"{int(p * 100)}%" for p in checkpoints]
+    body, colors = [header], [None]
+    for field, label in [("predicted_duration_s", "duration"), ("predicted_tokens", "tokens")]:
+        for cond in ("noagent", "withagent"):
+            vals = []
+            for p in checkpoints:
+                col = [abs(err_at(s, p, field))
+                       for conds in rows_by_task.values() if (s := conds.get(cond))]
+                vals.append(f"{np.median(col):.1f}" if col else "-")
+            body.append([label if cond == "noagent" else "", COND_LABEL[cond]] + vals)
+            colors.append("#e3f5ea" if cond == "withagent" else None)
+
+    fig, ax = plt.subplots(figsize=(11, 0.5 * len(body) + 1))
+    ax.axis("off")
+    tbl = ax.table(cellText=body, cellLoc="center", loc="center")
+    tbl.auto_set_font_size(False)
+    tbl.set_fontsize(9)
+    tbl.scale(1, 1.6)
+    for r, color in enumerate(colors):
+        for c in range(len(header)):
+            cell = tbl[r, c]
+            if r == 0:
+                cell.set_text_props(weight="bold")
+                cell.set_facecolor("#dddddd")
+            elif color:
+                cell.set_facecolor(color)
+    ax.set_title("Median |prediction error| %, by run progress", fontsize=12, fontweight="bold")
+    fig.tight_layout()
+    fig.savefig(out_dir / "progress_grid_table.png", dpi=180, bbox_inches="tight")
+    plt.close(fig)
+
+
 def run(manifest_path: Path) -> Path:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     # entry["log"] paths are stored relative to the repo root (see
@@ -222,6 +333,8 @@ def run(manifest_path: Path) -> Path:
     (out_dir / "comparison_table.tex").write_text(tex_src, encoding="utf-8")
     build_table_png(rows_by_task, out_dir / "comparison_table.png")
     build_error_decay_png(rows_by_task, out_dir / "error_decay_plots.png")
+    build_progress_grid(rows_by_task, out_dir)
+    build_grid_table_png(rows_by_task, out_dir)
 
     print(f"report written to {out_dir}")
     return out_dir
@@ -255,6 +368,14 @@ def _selftest() -> None:
                                           "log": tmp_path.name})
         assert s is not None
         assert s["tok_err_pct"] == (900 - 950) / 950 * 100
+
+        # err_at: p=1.0 must land on the last point (== the final-table number),
+        # small p on the first, and never index out of range for any grid value.
+        assert err_at(s, 1.0, "predicted_tokens") == s["tok_err_pct"]
+        assert err_at(s, 0.05, "predicted_tokens") == (1000 - 950) / 950 * 100
+        for p in GRID:
+            for f in ("predicted_tokens", "predicted_duration_s"):
+                assert isinstance(err_at(s, p, f), float)
         print("selftest OK")
     finally:
         tmp_path.unlink(missing_ok=True)

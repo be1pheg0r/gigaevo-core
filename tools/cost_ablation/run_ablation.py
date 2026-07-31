@@ -81,6 +81,44 @@ def is_finished(log_path: Path) -> bool:
     return "Duration:" in text
 
 
+def run_wave(tasks: list[str], out_dir: Path, args) -> list[dict]:
+    """Launch both conditions for every task in ``tasks``, wait, return manifest rows."""
+    dbs = find_free_dbs(len(tasks) * len(CONDITIONS))
+
+    rows, procs = [], []
+    i = 0
+    for task in tasks:
+        key = task.replace("/", "_")
+        for cond_name, cost_monitor in CONDITIONS:
+            db = dbs[i]
+            i += 1
+            log_path = out_dir / f"{key}_{cond_name}.log"
+            proc = launch(task, db, args.max_mutants, args.llm, cost_monitor, log_path)
+            rows.append({
+                "task": task, "key": key, "condition": cond_name, "db": db,
+                "log": str(log_path.relative_to(REPO_ROOT)), "pid": proc.pid,
+            })
+            procs.append((proc, log_path))
+            print(f"launched {task} [{cond_name}] db={db} pid={proc.pid} -> {log_path}", flush=True)
+            time.sleep(2)  # stagger to avoid a redis/ssh connection burst
+
+    print(f"Waiting for {len(procs)} runs (poll {args.poll_interval}s, timeout {args.timeout}s)...", flush=True)
+    start = time.time()
+    while time.time() - start < args.timeout:
+        done_flags = [is_finished(lp) for _, lp in procs]
+        if all(done_flags):
+            print("Wave finished.", flush=True)
+            break
+        print(f"  {sum(done_flags)}/{len(procs)} finished ({int(time.time() - start)}s elapsed)", flush=True)
+        time.sleep(args.poll_interval)
+    else:
+        print("WARNING: wave timed out — killing stragglers and moving on.", file=sys.stderr, flush=True)
+        for proc, _ in procs:
+            if proc.poll() is None:
+                proc.kill()
+    return rows
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--tasks", nargs="+", required=True,
@@ -90,48 +128,26 @@ def main() -> None:
     ap.add_argument("--out-dir", required=True,
                      help="relative to repo root, e.g. experiments/cost_ablation_20260801_120000")
     ap.add_argument("--poll-interval", type=int, default=60, help="seconds between health checks")
-    ap.add_argument("--timeout", type=int, default=3600 * 3, help="max seconds to wait for all runs")
+    ap.add_argument("--timeout", type=int, default=3600 * 3, help="max seconds to wait per wave")
+    ap.add_argument("--wave-size", type=int, default=0,
+                     help="tasks launched concurrently (0 = all at once). Each task costs 2 runs, "
+                          "and every run holds up to max_in_flight LLM slots — oversubscribing the "
+                          "server queues calls and distorts the achieved-concurrency measurement.")
     ap.add_argument("--skip-report", action="store_true", help="only launch + wait, skip building the report")
     args = ap.parse_args()
 
     out_dir = REPO_ROOT / args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    dbs = find_free_dbs(len(args.tasks) * len(CONDITIONS))
-
-    manifest = []
-    procs = []
-    i = 0
-    for task in args.tasks:
-        key = task.replace("/", "_")
-        for cond_name, cost_monitor in CONDITIONS:
-            db = dbs[i]
-            i += 1
-            log_path = out_dir / f"{key}_{cond_name}.log"
-            proc = launch(task, db, args.max_mutants, args.llm, cost_monitor, log_path)
-            manifest.append({
-                "task": task, "key": key, "condition": cond_name, "db": db,
-                "log": str(log_path.relative_to(REPO_ROOT)), "pid": proc.pid,
-            })
-            procs.append((proc, log_path))
-            print(f"launched {task} [{cond_name}] db={db} pid={proc.pid} -> {log_path}")
-            time.sleep(2)  # stagger to avoid a redis/ssh connection burst
-
-    (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-    print(f"manifest written to {out_dir / 'manifest.json'}")
-
-    print(f"Waiting for {len(procs)} runs to finish (poll every {args.poll_interval}s, timeout {args.timeout}s)...")
-    start = time.time()
-    while time.time() - start < args.timeout:
-        done_flags = [is_finished(lp) for _, lp in procs]
-        if all(done_flags):
-            print("All runs finished.")
-            break
-        print(f"  {sum(done_flags)}/{len(procs)} finished ({int(time.time() - start)}s elapsed)")
-        time.sleep(args.poll_interval)
-    else:
-        print("WARNING: timeout reached before all runs finished — proceeding with whatever is done.",
-              file=sys.stderr)
+    step = args.wave_size if args.wave_size > 0 else len(args.tasks)
+    manifest: list[dict] = []
+    for w, start_i in enumerate(range(0, len(args.tasks), step), 1):
+        batch = args.tasks[start_i:start_i + step]
+        print(f"=== wave {w}: {' '.join(batch)}", flush=True)
+        manifest += run_wave(batch, out_dir, args)
+        # rewrite after every wave so a crash still leaves a usable manifest
+        (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    print(f"manifest written to {out_dir / 'manifest.json'}", flush=True)
 
     if not args.skip_report:
         subprocess.run(
