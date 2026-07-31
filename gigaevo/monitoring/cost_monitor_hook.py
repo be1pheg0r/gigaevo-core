@@ -37,6 +37,23 @@ def _clamp_step(current: float, proposed: float, max_rel_step: float = 0.3) -> f
     return max(lo, min(hi, proposed))
 
 
+# Below this relative change a lever move is noise, not a decision: it costs
+# a wake-up and moves the forecast by less than the flush-to-flush jitter.
+# Standard deadband — a controller without one chatters around its setpoint.
+LEVER_DEADBAND = 0.05
+
+# A move that reverses the previous move on the same lever within this many
+# wake-ups is taken at half step. Reversal is the signature of a controller
+# hunting rather than converging, and halving is the cheapest damping there is.
+REVERSAL_WINDOW = 2
+
+# Blunt levers (golden_ratio, growth_rate_mult) apply to everything still
+# ahead, so the system prompt only allows them for a deviation that PERSISTED.
+# That was advice the model could ignore; now it has to name the evidence, and
+# a claim below this many calls is refused.
+MIN_SUSTAINED_CALLS = 5
+
+
 # Non-LLM pipeline stages whose wall-clock time the LLM-latency duration
 # model is otherwise blind to. Named explicitly (rather than "everything
 # that isn't an LLM stage") so the growth-law fit only sees stages known to
@@ -160,6 +177,8 @@ class CostMonitorHook:
         # Call indices already winsorised, so the agent can be told not to
         # spend another wakeup rediscovering a spike it has handled.
         self._flagged_calls: set[int] = set()
+        # lever name -> (direction of last accepted move, wakeup it happened on)
+        self._lever_dir: dict[str, tuple[int, int]] = {}
         subscribe(LLMCall.event, self._on_llm_call)
         subscribe(MutationAttempted.event, self._on_mutation_attempted)
         subscribe(BackpressureSample.event, self._on_backpressure_sample)
@@ -482,6 +501,48 @@ class CostMonitorHook:
             self._claim_agent()
             await self._run_agent()
 
+    def _blunt_lever_allowed(self, sustained_over_calls) -> bool:
+        """Did the agent back a blunt lever with a persistence claim?
+
+        The system prompt has always said golden/growth are only for a
+        deviation that PERSISTED across several calls — advice the model was
+        free to ignore, and did. Requiring the number turns it into something
+        that can be refused.
+        """
+        try:
+            n = int(sustained_over_calls)
+        except (TypeError, ValueError):
+            n = 0
+        if n >= MIN_SUSTAINED_CALLS:
+            return True
+        logger.info("[CostMonitorHook] blunt lever refused: sustained_over_calls={} < {}",
+                    n, MIN_SUSTAINED_CALLS)
+        return False
+
+    def _gate_lever(self, name: str, current: float, proposed: float) -> float | None:
+        """Deadband + reversal damping. ``None`` means the move was refused.
+
+        Two standard controller guards the loop was missing: a change too
+        small to be a decision is dropped, and a change that reverses the
+        previous one on the same lever within a couple of wake-ups is taken
+        at half step instead of letting the controller hunt.
+        """
+        if current > 0 and abs(proposed - current) / current < LEVER_DEADBAND:
+            logger.info("[CostMonitorHook] {} move ignored: {:.3f}->{:.3f} inside deadband",
+                        name, current, proposed)
+            return None
+        direction = 1 if proposed > current else -1
+        prev_dir, prev_at = self._lever_dir.get(name, (0, -10**9))
+        reversing = prev_dir != 0 and direction != prev_dir and \
+            (self._agent_calls - prev_at) <= REVERSAL_WINDOW
+        step = 0.3 / 2 if reversing else 0.3
+        value = _clamp_step(current, proposed, step)
+        self._lever_dir[name] = (direction, self._agent_calls)
+        if reversing:
+            logger.info("[CostMonitorHook] {} reverses its last move — half step to {:.3f}",
+                        name, value)
+        return value
+
     async def _run_agent(self) -> None:
         """Run one wakeup. The caller must have claimed it via ``_claim_agent``."""
         trigger = self._trigger_reason
@@ -531,13 +592,11 @@ class CostMonitorHook:
 
             adjustments = result.get("cost_adjustments", {})
             self._log_agent_trace(tools, trigger, adjustments, before={
-                "cold_start_factor": current_cold,
                 "golden_ratio": current_golden,
                 "growth_rate_mult": current_growth,
                 "concurrency_mult": current_conc_mult,
             })
             if adjustments:
-                cold = adjustments.get("cold_start_factor", -1)
                 golden = adjustments.get("golden_ratio", -1)
                 growth = adjustments.get("growth_rate_mult", -1)
                 conc_mult = adjustments.get("concurrency_mult", -1)
@@ -545,14 +604,23 @@ class CostMonitorHook:
                 outliers = adjustments.get("flag_outlier_indices", []) or []
                 self._flag_outliers(outliers)
 
-                if cold > 0:
-                    self._pred.llm_cold_override = cold
-                if golden > 0:
-                    self._pred.llm_golden_override = _clamp_step(current_golden, golden)
-                if growth > 0:
-                    self._pred.llm_growth_override = _clamp_step(current_growth, growth)
+                sustained = adjustments.get("sustained_over_calls", 0)
+                # golden/growth are the blunt levers: they scale everything
+                # still ahead, so they need evidence that the deviation
+                # persisted, not one surprising call.
+                blunt_ok = self._blunt_lever_allowed(sustained)
+                if golden > 0 and blunt_ok:
+                    v = self._gate_lever("golden_ratio", current_golden, golden)
+                    if v is not None:
+                        self._pred.llm_golden_override = v
+                if growth > 0 and blunt_ok:
+                    v = self._gate_lever("growth_rate_mult", current_growth, growth)
+                    if v is not None:
+                        self._pred.llm_growth_override = v
                 if conc_mult > 0:
-                    self._pred.llm_concurrency_override = _clamp_step(current_conc_mult, conc_mult)
+                    v = self._gate_lever("concurrency_mult", current_conc_mult, conc_mult)
+                    if v is not None:
+                        self._pred.llm_concurrency_override = v
                 if reasoning:
                     self._pred.llm_reasoning = reasoning
 
@@ -565,12 +633,11 @@ class CostMonitorHook:
                     "elapsed_s": self._clock() - self._t0,
                 }
                 logger.info(
-                    "[CostMonitorHook] adjustments: cold={} golden={} growth={} conc={} "
-                    "outliers={} trigger={!r} reason={}",
-                    cold, golden, growth, conc_mult, len(outliers), trigger, reasoning)
+                    "[CostMonitorHook] adjustments: golden={} growth={} conc={} "
+                    "sustained={} outliers={} trigger={!r} reason={}",
+                    golden, growth, conc_mult, sustained, len(outliers), trigger, reasoning)
                 emit(CostAgentAdjustment(
                     mutant_index=self._counter,
-                    cold_start_factor=cold,
                     golden_ratio=golden,
                     growth_rate_mult=growth,
                     concurrency_mult=conc_mult,
@@ -604,8 +671,7 @@ class CostMonitorHook:
 
         outliers = adjustments.get("flag_outlier_indices", []) or []
         skip = bool(adjustments.get("skip_calibration", False))
-        levers = {"cold_start_factor": _lever("cold_start_factor"),
-                  "golden_ratio": _lever("golden_ratio"),
+        levers = {"golden_ratio": _lever("golden_ratio"),
                   "growth_rate_mult": _lever("growth_rate_mult"),
                   "concurrency_mult": _lever("concurrency_mult")}
 

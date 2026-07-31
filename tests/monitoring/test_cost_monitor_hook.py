@@ -507,3 +507,106 @@ class TestOneWakeupRunsOnce:
             await hook._agent_task
         await hook()                                   # accept lands right after
         assert hook._agent_calls == 1
+
+
+class TestOnlineIntervalCalibration:
+    """The interval is graded by its own misses and widened/narrowed to hit
+    the target miscoverage — Gibbs & Candes ACI. Measured before this, the
+    published interval covered the truth 64-68% while aiming at 90%."""
+
+    def _hook(self, **kw):
+        pred = CostPrediction(max_mutants=100, max_in_flight=1)
+        return CostMonitorHook(agent=None, prediction=pred, interval=1000, **kw)
+
+    @pytest.mark.asyncio
+    async def test_repeated_misses_widen_the_interval(self) -> None:
+        hook = self._hook(aci_gamma=0.2)
+        start = hook._aci_scale
+        for _ in range(20):
+            hook._update_aci(True)
+        assert hook._aci_scale > start * 1.5
+
+    @pytest.mark.asyncio
+    async def test_never_missing_narrows_it(self) -> None:
+        hook = self._hook(aci_gamma=0.2)
+        for _ in range(20):
+            hook._update_aci(False)
+        assert hook._aci_scale < 1.0
+
+    @pytest.mark.asyncio
+    async def test_it_settles_when_misses_arrive_at_the_target_rate(self) -> None:
+        hook = self._hook(aci_gamma=0.1, aci_alpha=0.10)
+        for i in range(400):
+            hook._update_aci(i % 10 == 0)       # exactly 10% miscoverage
+        assert 0.8 < hook._aci_scale < 1.25
+
+    @pytest.mark.asyncio
+    async def test_gamma_zero_restores_the_model_only_width(self) -> None:
+        hook = self._hook(aci_gamma=0.0)
+        for _ in range(50):
+            hook._update_aci(True)
+        assert hook._aci_scale == 1.0
+
+    @pytest.mark.asyncio
+    async def test_the_scale_cannot_run_away(self) -> None:
+        hook = self._hook(aci_gamma=1.0)
+        for _ in range(500):
+            hook._update_aci(True)
+        assert hook._aci_scale <= 5.0
+        for _ in range(1000):
+            hook._update_aci(False)
+        assert hook._aci_scale >= 0.5
+
+    @pytest.mark.asyncio
+    async def test_a_wider_scale_really_reaches_the_published_interval(self) -> None:
+        """The scale is only worth anything if it lands in CostPrediction."""
+        narrow = self._hook(aci_gamma=0.0)
+        for i in range(4):
+            _call("A", 1000, 1000.0, tokens_out=200)
+            emit(MutationAttempted(mutant_id=f"m{i}"))
+        base = narrow._pred.ci_high_s - narrow._pred.ci_low_s
+
+        reset_subscribers()
+        wide = self._hook(aci_gamma=0.0)
+        wide._aci_scale = 3.0
+        for i in range(4):
+            _call("A", 1000, 1000.0, tokens_out=200)
+            emit(MutationAttempted(mutant_id=f"m{i}"))
+        assert (wide._pred.ci_high_s - wide._pred.ci_low_s) > base * 2
+
+
+class TestLeverGuards:
+    def _hook(self):
+        pred = CostPrediction(max_mutants=100, max_in_flight=8)
+        return CostMonitorHook(agent=None, prediction=pred, interval=1000)
+
+    def test_a_change_inside_the_deadband_is_refused(self) -> None:
+        hook = self._hook()
+        assert hook._gate_lever("golden_ratio", 1.00, 1.02) is None
+
+    def test_a_real_change_goes_through_clamped(self) -> None:
+        hook = self._hook()
+        assert hook._gate_lever("golden_ratio", 1.00, 1.20) == pytest.approx(1.20)
+        assert hook._gate_lever("growth_rate_mult", 1.00, 5.00) == pytest.approx(1.30)
+
+    def test_reversing_the_last_move_is_taken_at_half_step(self) -> None:
+        hook = self._hook()
+        hook._agent_calls = 1
+        assert hook._gate_lever("golden_ratio", 1.00, 1.40) == pytest.approx(1.30)
+        hook._agent_calls = 2
+        # full step down would allow 0.91; reversing halves it to 1.105
+        assert hook._gate_lever("golden_ratio", 1.30, 0.50) == pytest.approx(1.105)
+
+    def test_the_damping_expires(self) -> None:
+        hook = self._hook()
+        hook._agent_calls = 1
+        hook._gate_lever("golden_ratio", 1.00, 1.40)
+        hook._agent_calls = 9                     # far outside REVERSAL_WINDOW
+        assert hook._gate_lever("golden_ratio", 1.30, 0.50) == pytest.approx(0.91)
+
+    def test_a_blunt_lever_needs_a_persistence_claim(self) -> None:
+        hook = self._hook()
+        assert hook._blunt_lever_allowed(7) is True
+        assert hook._blunt_lever_allowed(2) is False
+        assert hook._blunt_lever_allowed(None) is False
+        assert hook._blunt_lever_allowed("lots") is False

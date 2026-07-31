@@ -73,8 +73,11 @@ SYSTEM_PROMPT = (
     "to change (>1 = throughput recovering, <1 = servers slowing down). Use "
     "this instead of golden_ratio when the cause is the SERVERS, not the "
     "programs — it is the only lever that touches the divisor\n"
-    "- `cold_start_factor`: float 0.3–1.0 — override warmup multiplier\n"
     "- `flag_outlier_indices`: list[int] — mark these call indices as outliers\n"
+    "- `sustained_over_calls`: int — REQUIRED whenever you set golden_ratio or "
+    "growth_rate_mult: over how many recent calls the deviation actually held. "
+    "Below 5 the change is refused, because a blunt lever must not answer a "
+    "single spike\n"
     "- `skip_calibration`: bool — skip the next scheduled calibration\n"
     "- `reasoning`: string ≤ 80 chars — why you made these decisions\n\n"
     "## Decision rules\n"
@@ -113,11 +116,11 @@ class LlmCallRecord:
 
 
 class _AdjustmentOutput(BaseModel):
-    cold_start_factor: float = Field(default=-1.0, description="Override cold_start (−1 = no change, 0.3–1.0)")
     golden_ratio: float = Field(default=-1.0, description="Override golden_ratio (−1 = no change, 0.8–2.0)")
     growth_rate_mult: float = Field(default=-1.0, description="Multiply growth_rate γ (−1 = no change, 0.5–3.0)")
     concurrency_mult: float = Field(default=-1.0, description="Multiply MEASURED achieved LLM concurrency (−1 = no change, 0.3–3.0)")
     flag_outlier_indices: list[int] = Field(default_factory=list, description="Indices of calls to ignore")
+    sustained_over_calls: int = Field(default=0, description="Calls the deviation held for; <5 refuses golden/growth")
     skip_calibration: bool = Field(default=False)
     reasoning: str = Field(default="")
 
@@ -264,16 +267,12 @@ class _ToolSet:
 
     def adjust_model(
         self,
-        cold_start_factor: float = -1,
         golden_ratio: float = -1,
         growth_rate_mult: float = -1,
         concurrency_mult: float = -1,
     ) -> str:
         """Adjust cost model parameters. −1 means 'no change'."""
         changes = []
-        if 0.2 <= cold_start_factor <= 1.0:
-            self.adjustments["cold_start_factor"] = cold_start_factor
-            changes.append(f"cold={cold_start_factor:.2f}")
         if 0.5 <= golden_ratio <= 2.0:
             self.adjustments["golden_ratio"] = golden_ratio
             changes.append(f"golden={golden_ratio:.2f}")
@@ -320,7 +319,7 @@ get_trigger()          → why you were woken up on this attempt
 get_last_adjustment_outcome() → your previous decision and what happened since
 
 Action tools:
-adjust_model(cold_start_factor=0.6, golden_ratio=1.15, growth_rate_mult=1.2, concurrency_mult=0.8)
+adjust_model(golden_ratio=1.15, growth_rate_mult=1.2, concurrency_mult=0.8)
 flag_as_outlier(index=3)
 skip_next_calibration()
 """
@@ -392,9 +391,9 @@ class CostMonitorAgent(LangGraphAgent):
             f"{context}\n\n"
             "Analyse the telemetry above and answer the trigger specifically. "
             "Respond with a JSON object:\n"
-            '{"cold_start_factor": float, "golden_ratio": float, '
-            '"growth_rate_mult": float, "concurrency_mult": float, '
-            '"flag_outlier_indices": [int], '
+            '{"golden_ratio": float, "growth_rate_mult": float, '
+            '"concurrency_mult": float, "flag_outlier_indices": [int], '
+            '"sustained_over_calls": int, '
             '"skip_calibration": bool, "reasoning": "..."}\n\n'
             "Use -1 for any parameter you do NOT want to change. Changing "
             "nothing (every value -1, no indices) is a valid and often correct "
@@ -420,7 +419,6 @@ class CostMonitorAgent(LangGraphAgent):
 
         # Apply adjustments
         tools = self._tools
-        cold = data.get("cold_start_factor", -1)
         golden = data.get("golden_ratio", -1)
         growth = data.get("growth_rate_mult", -1)
         # concurrency_mult used to be dropped here — not passed to adjust_model
@@ -434,8 +432,8 @@ class CostMonitorAgent(LangGraphAgent):
         skip = data.get("skip_calibration", False)
         reasoning = data.get("reasoning", "")
 
-        tools.adjust_model(cold_start_factor=cold, golden_ratio=golden,
-                           growth_rate_mult=growth, concurrency_mult=conc)
+        tools.adjust_model(golden_ratio=golden, growth_rate_mult=growth,
+                           concurrency_mult=conc)
 
         for idx in outliers:
             tools.flag_as_outlier(idx)
@@ -444,11 +442,11 @@ class CostMonitorAgent(LangGraphAgent):
             tools.skip_next_calibration()
 
         state["cost_adjustments"] = {
-            "cold_start_factor": tools.adjustments.get("cold_start_factor", -1),
             "golden_ratio": tools.adjustments.get("golden_ratio", -1),
             "growth_rate_mult": tools.adjustments.get("growth_rate_mult", -1),
             "concurrency_mult": tools.adjustments.get("concurrency_mult", -1),
             "flag_outlier_indices": tools.adjustments.get("flag_outlier_indices", []),
+            "sustained_over_calls": data.get("sustained_over_calls", 0),
             "skip_calibration": tools.adjustments.get("skip_calibration", False),
             "reasoning": reasoning,
         }
