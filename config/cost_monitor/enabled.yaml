@@ -33,3 +33,7 @@ post_step_hook:
   agent: ${cost_monitor_agent}
   prediction: ${cost_prediction}
   interval: 5
+  # montecarlo beat the 1/sqrt(n) heuristic and the other two probabilistic
+  # alternatives on coverage (closest to the 90% target) when validated
+  # against the 9 collected logs — see tools/cost_ablation/compare_ci_methods.py.
+  ci_method: montecarlo

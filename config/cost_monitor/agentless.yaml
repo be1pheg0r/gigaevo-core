@@ -23,3 +23,5 @@ post_step_hook:
   agent: ${cost_monitor_agent}
   prediction: ${cost_prediction}
   interval: 5
+  # see cost_monitor/enabled.yaml — same CI methodology, only the agent differs.
+  ci_method: montecarlo
