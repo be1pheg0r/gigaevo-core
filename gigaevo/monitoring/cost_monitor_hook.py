@@ -168,6 +168,8 @@ class CostMonitorHook:
         self._aci_alpha = aci_alpha
         self._aci_gamma = aci_gamma
         self._aci_scale = 1.0
+        # Intervals published but not yet contradicted by the elapsed clock.
+        self._pending_intervals: list[tuple[float, float]] = []
         self._flushes = 0
         self._miscoverages = 0
         self._agent_task: asyncio.Task | None = None
@@ -292,6 +294,30 @@ class CostMonitorHook:
         prev, self._prev_ci = self._prev_ci, duration_ci
         return prev if (prev and prev[1] > prev[0] > 0) else None
 
+    def _falsified_by_elapsed(self, elapsed_s: float) -> int:
+        """Past intervals the run has already outlived.
+
+        Self-consistency and accuracy are different things, and on the
+        collected runs they disagreed loudly: breaches sat at 4-15% (looking
+        calibrated) while only 64-68% of intervals contained the eventual
+        truth. An estimator that drifts smoothly stays consistent with itself
+        while being steadily wrong, so grading on breaches alone would tune
+        the wrong quantity.
+
+        The final duration is unknown mid-run, but ``elapsed`` is a hard lower
+        bound on it: once wall time passes an interval's upper edge, that
+        interval is definitively wrong — no future information can rescue it.
+        That is a real, one-sided coverage signal available online, and it
+        points the right way, since the measured failure is systematic
+        UNDER-estimation early in the run.
+        """
+        if not self._pending_intervals:
+            return 0
+        falsified = sum(1 for _, hi in self._pending_intervals if hi < elapsed_s)
+        if falsified:
+            self._pending_intervals = [iv for iv in self._pending_intervals if iv[1] >= elapsed_s]
+        return falsified
+
     def _update_aci(self, miscovered: bool) -> None:
         """Adaptive Conformal Inference on the interval half-width.
 
@@ -317,6 +343,18 @@ class CostMonitorHook:
         err = 1.0 if miscovered else 0.0
         self._aci_scale = float(min(5.0, max(0.5, self._aci_scale * math.exp(
             self._aci_gamma * (err - self._aci_alpha)))))
+
+    def _widen_for_falsified(self, n: int) -> None:
+        """One ACI step per interval the elapsed clock has already outlived.
+
+        Weighted harder than a breach: a breach says the estimator moved more
+        than it expected to, which is ordinary; an interval the run has
+        already outrun is simply false, and the only fix is a wider band.
+        """
+        if self._aci_gamma <= 0 or n <= 0:
+            return
+        self._aci_scale = float(min(5.0, max(0.5, self._aci_scale * math.exp(
+            self._aci_gamma * n * (1.0 - self._aci_alpha)))))
 
     def _check_agent_trigger(self, duration_s: float,
                              prev: tuple[float, float] | None, miscovered: bool) -> None:
@@ -457,6 +495,11 @@ class CostMonitorHook:
         miscovered = bool(prev_ci and not (prev_ci[0] <= duration_s <= prev_ci[1]))
         self._check_agent_trigger(duration_s, prev_ci, miscovered)
         self._update_aci(miscovered)
+        # Second, independent signal: intervals the clock has already outlived.
+        self._widen_for_falsified(self._falsified_by_elapsed(elapsed_s))
+        self._pending_intervals.append(duration_ci)
+        if len(self._pending_intervals) > 500:      # ponytail: cap, not a ring buffer
+            del self._pending_intervals[:250]
         self._flushes += 1
         self._miscoverages += int(miscovered)
         self._pred.predicted_total_tokens = int(est.predicted_total_tokens)
