@@ -318,6 +318,14 @@ function renderLedger() {
 
 const B = { task: null, probe: null, timer: null };
 
+/** Russian needs three forms, and "хватит на 41 мутаций" reads as a bug. */
+const plural = (n, one, few, many) => {
+  const a = Math.abs(n) % 100, b = a % 10;
+  if (a > 10 && a < 20) return many;
+  if (b > 1 && b < 5) return few;
+  return b === 1 ? one : many;
+};
+
 const compact = (n) =>
   n >= 1e6 ? `${(n / 1e6).toFixed(n >= 1e7 ? 0 : 1)}M`
   : n >= 1e3 ? `${(n / 1e3).toFixed(0)}k` : String(Math.round(n));
@@ -453,29 +461,23 @@ function renderBudgetAnswer() {
     `</div>`;
   block.append(verdict);
 
-  // The second question, and the one worth acting on when the answer to the
-  // first is no: how far does the money actually go.
-  const af = a.affordable;
-  const rows = [
-    ["если прогон встанет по верхнему краю интервала", af.cautious, "планировать по этому"],
-    ["по центральной оценке", af.point, ""],
-    ["если по нижнему краю", af.optimistic, ""],
-  ];
-  const t = el("table", "grid-table");
-  t.innerHTML =
-    `<thead><tr><th>На сколько попыток хватит ${compact(a.budget_tokens)} токенов</th>` +
-    `<th>попыток</th><th>&nbsp;</th></tr></thead><tbody>` +
-    rows.map(([lbl, n, note]) =>
-      `<tr><td>${lbl}</td><td><b>${n}</b></td>` +
-      `<td style="color:var(--ink-3)">${note}</td></tr>`
-    ).join("") + `</tbody>`;
-  block.append(t);
-
-  if (af.cautious === 0) {
-    block.append(el("p", "note",
-      "Ноль означает, что бюджет меньше того, что уже потрачено на саму прикидку — "
-      + "эти токены не вернуть."));
+  // The second question, and the one worth acting on either way: how far does
+  // the money actually go. One range, not three numbers to weigh up.
+  const [nLo, nHi] = a.affordable;
+  const reach = el("div", "reach");
+  if (nLo === 0 && nHi === 0) {
+    reach.innerHTML =
+      `<div class="reach__num" style="color:var(--crit)">не хватит ни на что</div>` +
+      `<div class="reach__hint">Бюджет меньше того, что ушло на саму прикидку — ` +
+      `эти токены уже потрачены и не вернутся.</div>`;
+  } else {
+    const span = nLo === nHi ? `${nLo}` : `${nLo}–${nHi}`;
+    reach.innerHTML =
+      `<div class="reach__num">хватит на <b>${span}</b> ${plural(nHi, "мутацию", "мутации", "мутаций")}</div>` +
+      `<div class="reach__hint">Медиана и верхний квартиль стоимости: ` +
+      `нижний край — если прогон окажется дороже обычного.</div>`;
   }
+  block.append(reach);
   block.append(logTail(p));
   box.append(block);
 }

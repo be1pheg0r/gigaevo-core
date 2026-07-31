@@ -579,11 +579,16 @@ def probe_answer(p: Probe) -> dict | None:
     if point <= 0:
         return None
     fits = hi <= p.budget_tokens
-    # The horizon question, answered as a range: if the run turns out to cost
-    # the top of its interval, the same budget buys fewer attempts. Scale the
-    # budget by the relative width measured at the target horizon rather than
-    # re-deriving an interval at every bisection step.
-    w_hi, w_lo = hi / point, max(lo / point, 1e-6)
+    # The horizon question, answered as ONE range rather than three numbers:
+    # cost between its median and its upper quartile, which is the band worth
+    # planning against. The 90% interval above is what the estimate publishes
+    # about itself; on a 10-attempt probe it spans a factor of two and reads
+    # as "no idea", so it stays out of the headline sentence.
+    q75 = hook.project_tokens(p.attempts, alpha=0.5)[1][1]
+    # More tokens per run buys fewer attempts, so the pessimistic cost gives
+    # the LOW end of the attempts range.
+    n_hi = hook.affordable_attempts(p.budget_tokens)
+    n_lo = hook.affordable_attempts(p.budget_tokens / max(q75 / point, 1.0))
     answer = {
         "observed_attempts": hook._attempts,
         "target_attempts": p.attempts,
@@ -593,11 +598,8 @@ def probe_answer(p: Probe) -> dict | None:
         # "Enough" only if even the top of the interval fits. Anything else is
         # a coin flip dressed up as a yes.
         "verdict": "fits" if fits else ("tight" if point <= p.budget_tokens else "over"),
-        "affordable": {
-            "cautious": hook.affordable_attempts(p.budget_tokens / w_hi),
-            "point": hook.affordable_attempts(p.budget_tokens),
-            "optimistic": hook.affordable_attempts(p.budget_tokens / w_lo),
-        },
+        # Median-to-upper-quartile, in attempts. Read as "хватит на n_lo–n_hi".
+        "affordable": [min(n_lo, n_hi), max(n_lo, n_hi)],
     }
     _probe_cache[p.name] = (stamp, answer)
     return answer
@@ -898,19 +900,19 @@ def _selftest() -> None:
             assert a["verdict"] == "fits", a
             # 10 attempts x 3500 tokens -> ~35k observed, ~350k projected to 100
             assert 200_000 < a["predicted_tokens"] < 600_000, a
-            assert a["affordable"]["cautious"] <= a["affordable"]["point"] \
-                <= a["affordable"]["optimistic"], a
+            # one range, low end first, and the quartile band is NARROWER than
+            # the 90% interval — that is the whole reason budget mode quotes it
+            n_lo, n_hi = a["affordable"]
+            assert 0 < n_lo <= n_hi, a
 
             over = _probe(1_000)
             assert over["verdict"] == "over", over
-            assert over["affordable"]["point"] == 0, over  # already overspent
+            assert over["affordable"] == [0, 0], over  # already overspent
 
             tight = _probe(int(a["predicted_tokens"]) + 1)
             assert tight["verdict"] == "tight", tight
-            assert tight["affordable"]["cautious"] < tight["affordable"]["optimistic"], tight
-            # the point answer sits inside the range the interval implies
-            assert (tight["affordable"]["cautious"] <= tight["affordable"]["point"]
-                    <= tight["affordable"]["optimistic"]), tight
+            t_lo, t_hi = tight["affordable"]
+            assert 0 < t_lo <= t_hi, tight
 
             assert probe_answer(Probe(name="t", task="t", attempts=100, budget_tokens=1,
                                       proc=None, log=Path("/nope.log"))) is None

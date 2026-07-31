@@ -181,8 +181,8 @@ class CostMonitorHook:
         self._flagged_calls: set[int] = set()
         # lever name -> (direction of last accepted move, wakeup it happened on)
         self._lever_dir: dict[str, tuple[int, int]] = {}
-        # horizon -> (tokens, ci); see project_tokens. Dropped on every flush.
-        self._projection_memo: dict[int, tuple[float, tuple[float, float]]] = {}
+        # (horizon, alpha) -> (tokens, ci); see project_tokens. Dropped on flush.
+        self._projection_memo: dict[tuple[int, float], tuple[float, tuple[float, float]]] = {}
         subscribe(LLMCall.event, self._on_llm_call)
         subscribe(MutationAttempted.event, self._on_mutation_attempted)
         subscribe(BackpressureSample.event, self._on_backpressure_sample)
@@ -542,13 +542,18 @@ class CostMonitorHook:
     # more than I have, how many attempts do I get. Same per-stage growth
     # laws, re-integrated to a different horizon — no second cost model.
 
-    def project_tokens(self, attempts_target: int) -> tuple[float, tuple[float, float]]:
+    def project_tokens(self, attempts_target: int,
+                       alpha: float = 0.1) -> tuple[float, tuple[float, float]]:
         """Total tokens this run would spend if it ran to ``attempts_target``.
 
         Each stage fires at its own observed rate per attempt (some stages
         skip-cascade), so the horizon scales that rate rather than the raw
         bucket count — the same projection ``_flush_mutant_bucket`` makes
         against ``max_mutants``.
+
+        ``alpha`` sets the returned band's tail mass: 0.1 is the 90% interval,
+        0.5 the quartiles. Budget mode quotes the quartiles — a 90% band on a
+        10-attempt probe spans a factor of two and answers nothing.
         """
         if not self._tokens_by_stage:
             return 0.0, (0.0, 0.0)
@@ -556,7 +561,8 @@ class CostMonitorHook:
         # cheap; the hook's buckets do not change while a budget question is
         # being answered, so the horizon is a sound cache key. Invalidated by
         # the flush that appends a new bucket.
-        hit = self._projection_memo.get(attempts_target)
+        key = (attempts_target, alpha)
+        hit = self._projection_memo.get(key)
         if hit is not None:
             return hit
         units = {
@@ -571,9 +577,10 @@ class CostMonitorHook:
             fit_tokens_by_stage=self._winsorised(self._tokens_by_stage),
             fit_latency_by_stage=self._winsorised(self._latency_by_stage),
             ci_method=self._ci_method,
+            ci_alpha=alpha,
         )
         out = (est.predicted_total_tokens, est.tokens_ci)
-        self._projection_memo[attempts_target] = out
+        self._projection_memo[key] = out
         return out
 
     def affordable_attempts(self, budget_tokens: float, *, hi: int = 100_000) -> int:

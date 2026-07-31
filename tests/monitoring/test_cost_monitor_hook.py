@@ -669,3 +669,31 @@ class TestBudgetMode:
         pred = CostPrediction(max_mutants=1, max_in_flight=1)
         hook = CostMonitorHook(agent=None, prediction=pred, interval=1000)
         assert hook.project_tokens(100) == (0.0, (0.0, 0.0))
+
+    def test_the_quartile_band_is_narrower_than_the_ninety(self) -> None:
+        """Budget mode quotes quartiles for a reason: on a 10-attempt probe the
+        90% band spans a factor of two and answers nothing."""
+        pred = CostPrediction(max_mutants=1, max_in_flight=1)
+        hook = CostMonitorHook(agent=None, prediction=pred, interval=1000,
+                               ci_method="montecarlo")
+        for i in range(10):
+            _call("A", 1000 + 60 * i, 100.0, tokens_out=100)
+            emit(MutationAttempted(mutant_id=f"m{i}"))
+        point, (lo90, hi90) = hook.project_tokens(100)
+        _, (lo50, hi50) = hook.project_tokens(100, alpha=0.5)
+        assert lo90 <= lo50 <= point <= hi50 <= hi90, (lo90, lo50, point, hi50, hi90)
+        assert (hi50 - lo50) < (hi90 - lo90)
+
+    def test_the_memo_does_not_confuse_two_bands(self) -> None:
+        """Same horizon, different alpha — one must not be served from the
+        other's cache entry."""
+        pred = CostPrediction(max_mutants=1, max_in_flight=1)
+        hook = CostMonitorHook(agent=None, prediction=pred, interval=1000,
+                               ci_method="montecarlo")
+        for i in range(10):
+            _call("A", 1000 + 60 * i, 100.0, tokens_out=100)
+            emit(MutationAttempted(mutant_id=f"m{i}"))
+        wide = hook.project_tokens(100)[1]
+        narrow = hook.project_tokens(100, alpha=0.5)[1]
+        assert wide != narrow
+        assert hook.project_tokens(100)[1] == wide          # still the wide one

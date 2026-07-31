@@ -378,7 +378,8 @@ CI_METHODS = {
 }
 
 
-def relative_tail_width(ci_method: str, law_cls: type, values: list[float], n: float) -> float:
+def relative_tail_width(ci_method: str, law_cls: type, values: list[float], n: float,
+                        alpha: float = 0.1) -> float:
     """Turn one of :data:`CI_METHODS`' absolute (lo, hi) bands into a
     relative half-width comparable to :func:`confidence_width`'s role, so
     any of the three probabilistic methods can be swapped in wherever the
@@ -386,11 +387,16 @@ def relative_tail_width(ci_method: str, law_cls: type, values: list[float], n: f
     :func:`estimate_duration_by_stage`) without touching the surrounding
     anchoring/tail_mult/concurrency machinery. Falls back to the heuristic
     when there isn't enough data for the method to produce a band.
+
+    ``alpha`` is the band's tail mass, forwarded to the method: 0.1 is the
+    90% interval the live estimate publishes, 0.5 asks the same machinery
+    for the quartiles instead — which is what budget mode quotes, because
+    "somewhere in a 90% band" is not a number anyone can plan against.
     """
     k = len(values)
     if k < 2 or n <= k:
         return confidence_width(k)
-    lo, hi = CI_METHODS[ci_method](law_cls, values, n)
+    lo, hi = CI_METHODS[ci_method](law_cls, values, n, alpha=alpha)
     tail_point = tail_integral(law_cls.fit(values), values, n)
     if tail_point <= 0:
         return confidence_width(k)
@@ -457,6 +463,7 @@ def estimate_by_stage(
     fit_tokens_by_stage: dict[str, list[float]] | None = None,
     fit_latency_by_stage: dict[str, list[float]] | None = None,
     ci_method: str | None = None,
+    ci_alpha: float = 0.1,
 ) -> GrowthEstimate:
     """Same as :func:`estimate`, but fits one growth law per call stage
     (e.g. ``MutationSuggestionAgent`` vs ``MutationAgent``) instead of one
@@ -490,8 +497,8 @@ def estimate_by_stage(
         tok_total = sum(tokens) + tail_integral(tok_law, tokens, n, fit_tok)
         lat_total_s = (sum(latency) + tail_integral(lat_law, latency, n, fit_lat)) / 1000.0
         if ci_method:
-            w_tok = relative_tail_width(ci_method, law_cls, fit_tok, n)
-            w_lat = relative_tail_width(ci_method, law_cls, fit_lat, n)
+            w_tok = relative_tail_width(ci_method, law_cls, fit_tok, n, ci_alpha)
+            w_lat = relative_tail_width(ci_method, law_cls, fit_lat, n, ci_alpha)
         else:
             w_tok = confidence_width(tok_law.n_points)
             w_lat = confidence_width(lat_law.n_points)
