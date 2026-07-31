@@ -576,6 +576,7 @@ def estimate_duration_by_stage(
     fit_latency_by_stage: dict[str, list[float]] | None = None,
     fit_nonllm_by_stage: dict[str, list[float]] | None = None,
     ci_method: str | None = None,
+    width_scale: float = 1.0,
 ) -> tuple[float, tuple[float, float]]:
     """Predict total wall-clock duration via the TTFT+TPOT physical model
     (:func:`fit_ttft_tpot`) per stage instead of fitting latency itself as
@@ -648,6 +649,12 @@ def estimate_duration_by_stage(
     conc = concurrency if concurrency and concurrency > 0 else max(max_in_flight, 1)
     duration_s = max(0.0, elapsed_s + remaining_ms * tail_mult / 1000.0 / conc)
     w = (weighted_w_num / remaining_ms) if (ci_method and remaining_ms > 0) else confidence_width(n_points)
+    # ``width_scale`` is the online calibration factor (see
+    # CostMonitorHook._update_aci): every width here is a model-based guess at
+    # how wrong the tail could be, and on the collected runs those guesses
+    # covered the truth 64-68% of the time while aiming at 90%. The scale is
+    # driven by observed miscoverage rather than by a better model of the tail.
+    w *= max(width_scale, 0.0)
     # Only the predicted part carries uncertainty; elapsed time is measured.
     half = (duration_s - elapsed_s) * w
     return duration_s, (duration_s - half, duration_s + half)

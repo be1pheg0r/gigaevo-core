@@ -128,7 +128,8 @@ EVENT_CLASSES = {
 
 def replay_log(path: Path, *, apply_agent: bool = False,
                outlier_policy: bool = False, ci_method: str | None = None,
-               ci_checkpoint_fracs: list[float] | None = None) -> dict | None:
+               ci_checkpoint_fracs: list[float] | None = None,
+               aci_gamma: float = 0.05, aci_alpha: float = 0.10) -> dict | None:
     """Parse ``path``'s raw events + ground truth, replay the events through
     a fresh CostMonitorHook using the currently-installed code, and return a
     summary dict shaped like build_report.summarize()'s output — or None if
@@ -203,6 +204,7 @@ def replay_log(path: Path, *, apply_agent: bool = False,
         hook = CostMonitorHook(  # noqa: F841
             agent=NoOpCostMonitorAgent(), prediction=pred, interval=5,
             clock=lambda: clock_now[0], ci_method=ci_method,
+            aci_gamma=aci_gamma, aci_alpha=aci_alpha,
         )
 
         pending_adj = list(adjustments) if apply_agent else []
@@ -237,11 +239,12 @@ def replay_log(path: Path, *, apply_agent: bool = False,
                 # Consume the trigger exactly as _run_agent() would, so the
                 # replay reproduces the real wake-up CADENCE (the LLM call
                 # itself still isn't reproduced — see the module docstring).
-                fired = hook._agent_due
+                fired = hook._can_dispatch_agent()
                 if fired:
-                    hook._agent_due = False
-                    hook._agent_calls += 1
-                    hook._last_agent_attempt = hook._attempts
+                    # Go through the hook's own claim so the replay cannot
+                    # drift from the live wake-up bookkeeping.
+                    hook._claim_agent()
+                    hook._agent_running = False
                     if outlier_policy:
                         # Deterministic stand-in for the LLM's judgement, so the
                         # MECHANISM can be measured separately from the model's
@@ -295,6 +298,11 @@ def main() -> None:
                      help="if set, write comparison_table.tex/.png + error_decay_plots.png here")
     ap.add_argument("--ci-method", choices=["bootstrap", "montecarlo", "bayesian"], default=None,
                      help="swap the CI width for a probabilistic method (default: 1/sqrt(n) heuristic)")
+    ap.add_argument("--aci-gamma", type=float, default=0.05,
+                     help="step size of the online interval calibration; 0 disables it "
+                          "and restores the model-only width")
+    ap.add_argument("--aci-alpha", type=float, default=0.10,
+                     help="target miscoverage rate, i.e. also the target agent wake-up rate")
     args = ap.parse_args()
 
     # emit() re-logs every replayed event through loguru at INFO — noisy and
@@ -305,7 +313,8 @@ def main() -> None:
     print(f"{'log':45s} {'n':>5s} {'pred_tok':>10s} {'act_tok':>10s} {'tok_err%':>9s} "
           f"{'pred_dur':>9s} {'act_dur':>9s} {'dur_err%':>9s}")
     for log_path in args.logs:
-        result = replay_log(log_path, ci_method=args.ci_method)
+        result = replay_log(log_path, ci_method=args.ci_method,
+                            aci_gamma=args.aci_gamma, aci_alpha=args.aci_alpha)
         if not result:
             print(f"{log_path.name:45s} -- skipped (no events / no ground truth)")
             continue

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import statistics
 import time
 
@@ -72,6 +73,8 @@ class CostMonitorHook:
         warmup_attempts: int = 5,
         min_leverage: float = 0.15,
         ci_method: str | None = None,
+        aci_alpha: float = 0.10,
+        aci_gamma: float = 0.05,
     ):
         self._agent = agent
         self._pred = prediction
@@ -142,6 +145,14 @@ class CostMonitorHook:
         self._cooldown_attempts = cooldown_attempts
         self._warmup_attempts = warmup_attempts
         self._min_leverage = min_leverage
+        # Online interval calibration (see _update_aci). alpha is the target
+        # miscoverage rate, i.e. also the target agent wakeup rate; gamma is
+        # the step. gamma=0 disables it and restores the model-only width.
+        self._aci_alpha = aci_alpha
+        self._aci_gamma = aci_gamma
+        self._aci_scale = 1.0
+        self._flushes = 0
+        self._miscoverages = 0
         self._agent_task: asyncio.Task | None = None
         # Kept only to report what watching cost — never fed to the estimator.
         self._observer_calls = 0
@@ -248,7 +259,48 @@ class CostMonitorHook:
             out[stage] = [med if i in flagged else v for i, v in enumerate(vals)]
         return out
 
-    def _check_agent_trigger(self, duration_s: float) -> None:
+    def _rotate_interval(self, duration_ci: tuple[float, float]) -> tuple[float, float] | None:
+        """Publish this flush's interval, return the usable previous one.
+
+        The comparison "did the new estimate land inside what the previous one
+        promised" is the single signal behind both the agent trigger and the
+        width calibration, so it is derived once here. It used to be computed
+        inside ``_check_agent_trigger`` off ``self._pred.ci_*``, which at that
+        point still held the PREVIOUS flush's interval — the comparison was
+        against the interval published two flushes back, one step staler than
+        intended.
+        """
+        prev, self._prev_ci = self._prev_ci, duration_ci
+        return prev if (prev and prev[1] > prev[0] > 0) else None
+
+    def _update_aci(self, miscovered: bool) -> None:
+        """Adaptive Conformal Inference on the interval half-width.
+
+        Gibbs & Candès (NeurIPS 2021): treat the miscoverage level as a single
+        parameter re-estimated online from hit/miss feedback. It buys a
+        long-run coverage guarantee with no exchangeability assumption, which
+        matters here because a run is a distribution shift by construction
+        (cold start -> steady state).
+
+        Measured on 20 runs of the alphaevolve ablation, the model-based
+        interval covered the eventual truth 64-68% of the time while aiming
+        at 90%: it claimed precision it did not have. Multiplicative update
+        so the scale stays positive; clipped so one weird flush cannot make
+        the band useless in either direction.
+
+        Second effect, and the reason this sits in the control loop rather
+        than in the estimator: miscoverage IS the agent's wakeup condition,
+        so driving its frequency to ``aci_alpha`` turns the wakeup rate into
+        a quantity we set instead of one we discover.
+        """
+        if self._aci_gamma <= 0:
+            return
+        err = 1.0 if miscovered else 0.0
+        self._aci_scale = float(min(5.0, max(0.5, self._aci_scale * math.exp(
+            self._aci_gamma * (err - self._aci_alpha)))))
+
+    def _check_agent_trigger(self, duration_s: float,
+                             prev: tuple[float, float] | None, miscovered: bool) -> None:
         """Decide whether this flush should wake CostMonitorAgent.
 
         Wakes it when the estimator surprises itself — the new estimate falls
@@ -258,7 +310,6 @@ class CostMonitorHook:
         leverage: past ~85% of predicted wall time the agent's multiplier
         scales an almost-empty tail and can only add noise.
         """
-        prev, self._prev_ci = self._prev_ci, (self._pred.ci_low_s, self._pred.ci_high_s)
         if self._agent_due or self._agent_calls >= self._max_agent_calls:
             return
         if self._attempts - self._last_agent_attempt < self._cooldown_attempts:
@@ -270,7 +321,7 @@ class CostMonitorHook:
             self._agent_due = True
             self._trigger_reason = f"first look after {self._attempts} attempts"
             return
-        if prev and prev[1] > prev[0] > 0 and not (prev[0] <= duration_s <= prev[1]):
+        if miscovered and prev:
             direction = "above" if duration_s > prev[1] else "below"
             self._agent_due = True
             self._trigger_reason = (
@@ -378,8 +429,17 @@ class CostMonitorHook:
             fit_latency_by_stage=fit_latency,
             fit_nonllm_by_stage=fit_nonllm,
             ci_method=self._ci_method,
+            width_scale=self._aci_scale,
         )
-        self._check_agent_trigger(duration_s)
+        # Predict with the current width, observe, then update it — the online
+        # order ACI requires; updating first would grade the interval against
+        # the very estimate that widened it.
+        prev_ci = self._rotate_interval(duration_ci)
+        miscovered = bool(prev_ci and not (prev_ci[0] <= duration_s <= prev_ci[1]))
+        self._check_agent_trigger(duration_s, prev_ci, miscovered)
+        self._update_aci(miscovered)
+        self._flushes += 1
+        self._miscoverages += int(miscovered)
         self._pred.predicted_total_tokens = int(est.predicted_total_tokens)
         self._pred.predicted_duration_s = duration_s
         self._pred.token_ci_low, self._pred.token_ci_high = (
@@ -404,6 +464,8 @@ class CostMonitorHook:
                 "attempts": self._attempts,
                 "concurrency": self._concurrency,
                 "agent_due": self._agent_due,
+                "aci_scale": self._aci_scale,
+                "miscoverage_rate": self._miscoverages / max(self._flushes, 1),
             }),
         )
 
