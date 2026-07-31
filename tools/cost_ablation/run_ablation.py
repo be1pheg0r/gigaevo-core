@@ -32,6 +32,7 @@ import json
 import subprocess
 import sys
 import time
+import zlib
 from pathlib import Path
 
 import redis
@@ -55,7 +56,8 @@ def find_free_dbs(n: int, host: str = "localhost", port: int = 6379) -> list[int
     return free
 
 
-def launch(task: str, db: int, max_mutants: int, llm: str, cost_monitor: str, log_path: Path) -> subprocess.Popen:
+def launch(task: str, db: int, max_mutants: int, llm: str, cost_monitor: str, log_path: Path,
+           seed: int | None = None) -> subprocess.Popen:
     cmd = [
         "python3", "run.py",
         f"problem.name={task}",
@@ -65,6 +67,8 @@ def launch(task: str, db: int, max_mutants: int, llm: str, cost_monitor: str, lo
         "redis.resume=true",
         f"+cost_monitor={cost_monitor}",
     ]
+    if seed is not None:
+        cmd.append(f"+seed={seed}")
     log_f = open(log_path, "w", encoding="utf-8")
     return subprocess.Popen(
         cmd, cwd=REPO_ROOT, stdout=log_f, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
@@ -81,12 +85,22 @@ def is_finished(log_path: Path) -> bool:
     return "Duration:" in text
 
 
+def seed_for(base: int, key: str, rep: int) -> int:
+    """Seed for one (task, replicate) — shared by BOTH arms of that pair.
+
+    crc32, not ``hash()``: Python randomises string hashing per process, so
+    ``hash()`` would give a different seed every time the driver is invoked
+    and the experiment would not be reproducible across restarts.
+    """
+    return base + rep * 1000 + zlib.crc32(key.encode()) % 997
+
+
 def write_manifest(out_dir: Path, manifest: list[dict]) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
 
-def run_wave(tasks: list[str], out_dir: Path, args, manifest: list[dict]) -> None:
+def run_wave(tasks: list[str], out_dir: Path, args, manifest: list[dict], rep: int = 0) -> None:
     """Launch both conditions for every task in ``tasks``, then wait for them.
 
     Appends to ``manifest`` and flushes it to disk after EVERY launch, not
@@ -101,13 +115,20 @@ def run_wave(tasks: list[str], out_dir: Path, args, manifest: list[dict]) -> Non
     i = 0
     for task in tasks:
         key = task.replace("/", "_")
+        # ONE seed per (task, replicate): both arms of a pair see the same
+        # model-routing draw, so the comparison is matched rather than two
+        # independent samples. Pairing removes the shared variance and is the
+        # cheapest statistical power available at a fixed compute budget.
+        seed = None if args.seed is None else seed_for(args.seed, key, rep)
         for cond_name, cost_monitor in CONDITIONS:
             db = dbs[i]
             i += 1
-            log_path = out_dir / f"{key}_{cond_name}.log"
-            proc = launch(task, db, args.max_mutants, args.llm, cost_monitor, log_path)
+            suffix = f"_rep{rep}" if rep else ""
+            log_path = out_dir / f"{key}_{cond_name}{suffix}.log"
+            proc = launch(task, db, args.max_mutants, args.llm, cost_monitor, log_path, seed)
             manifest.append({
                 "task": task, "key": key, "condition": cond_name, "db": db,
+                "replicate": rep, "seed": seed,
                 "log": str(log_path.relative_to(REPO_ROOT)), "pid": proc.pid,
             })
             write_manifest(out_dir, manifest)
@@ -145,6 +166,14 @@ def main() -> None:
                      help="tasks launched concurrently (0 = all at once). Each task costs 2 runs, "
                           "and every run holds up to max_in_flight LLM slots — oversubscribing the "
                           "server queues calls and distorts the achieved-concurrency measurement.")
+    ap.add_argument("--seed", type=int, default=None,
+                     help="base seed. Both arms of a task get the SAME seed, so the two "
+                          "conditions are compared on matched model-routing draws instead of "
+                          "two independent samples. Omit for the old unpaired behaviour.")
+    ap.add_argument("--replicates", type=int, default=1,
+                     help="how many seeds per task. A single-seed ablation can rank two "
+                          "variants the opposite way from another seed, so >1 is what makes "
+                          "a result reportable.")
     ap.add_argument("--skip-report", action="store_true", help="only launch + wait, skip building the report")
     args = ap.parse_args()
 
@@ -156,11 +185,12 @@ def main() -> None:
 
     step = args.wave_size if args.wave_size > 0 else len(args.tasks)
     manifest: list[dict] = []
-    for w, start_i in enumerate(range(0, len(args.tasks), step), 1):
-        batch = args.tasks[start_i:start_i + step]
-        print(f"=== wave {w}: {' '.join(batch)}", flush=True)
-        run_wave(batch, out_dir, args, manifest)
-        write_manifest(out_dir, manifest)
+    for rep in range(max(args.replicates, 1)):
+        for w, start_i in enumerate(range(0, len(args.tasks), step), 1):
+            batch = args.tasks[start_i:start_i + step]
+            print(f"=== replicate {rep} wave {w}: {' '.join(batch)}", flush=True)
+            run_wave(batch, out_dir, args, manifest, rep=rep)
+            write_manifest(out_dir, manifest)
     print(f"manifest written to {out_dir / 'manifest.json'}", flush=True)
 
     if not args.skip_report:
@@ -171,5 +201,27 @@ def main() -> None:
         )
 
 
+def _selftest() -> None:
+    """The one property the paired design rests on: both arms of a task share
+    a seed, and that seed is stable across driver restarts."""
+    a = seed_for(7, "alphaevolve_packing_circles_n_26", 0)
+    b = seed_for(7, "alphaevolve_packing_circles_n_26", 0)
+    assert a == b, "same task+replicate must give the same seed"
+    assert a != seed_for(7, "alphaevolve_packing_circles_n_26", 1), "replicates must differ"
+    assert a != seed_for(7, "alphaevolve_erdos_minimum_overlap", 0), "tasks must differ"
+    # stable across processes — the whole point of not using hash()
+    out = subprocess.run(
+        [sys.executable, "-c",
+         "import sys,zlib;sys.path.insert(0,'tools/cost_ablation');"
+         "from run_ablation import seed_for;print(seed_for(7,'alphaevolve_packing_circles_n_26',0))"],
+        cwd=REPO_ROOT, capture_output=True, text=True)
+    assert out.stdout.strip() == str(a), (out.stdout, out.stderr)
+    print("selftest OK")
+
+
 if __name__ == "__main__":
-    main()
+    if "--selftest" in sys.argv:
+        _selftest()
+    else:
+        main()
+

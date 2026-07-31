@@ -31,6 +31,19 @@ async def run_experiment(cfg: DictConfig) -> None:
     start_time = time.time()
     logger.info("GigaEvo — Problem: {}", cfg.problem.name)
 
+    # `+seed=N` makes the model router's weighted choice (gigaevo/llm/models.py
+    # draws from the global `random`) reproducible. That is what lets an
+    # ablation pair its two arms: without it one arm can draw noticeably more
+    # 9B than 35B calls than the other and the difference gets attributed to
+    # the condition under test. Server-side sampling is still stochastic — this
+    # removes the variance we control, not all of it.
+    seed = cfg.get("seed", None)
+    if seed is not None:
+        import random
+
+        random.seed(int(seed))
+        logger.info("Seeded model routing with seed={}", seed)
+
     redis_storage: RedisProgramStorage | None = None
     writer: LogWriter | None = None
     try:
