@@ -199,6 +199,10 @@ html[data-view="analyze"] .view[data-view="analyze"] { display: block; }
 .task input { accent-color: var(--auto); width: 15px; height: 15px; margin: 0; }
 .task__name { font-family: var(--mono); font-size: 13px; overflow-wrap: anywhere; }
 .task__seeds { font-size: 11px; color: var(--ink-3); font-family: var(--mono); }
+.task--blocked .task__name { color: var(--ink-3); }
+.task__warn { font-family: var(--mono); font-size: 10.5px; color: var(--crit);
+  border: 1px solid color-mix(in srgb, var(--crit) 45%, var(--rule)); border-radius: 999px;
+  padding: 1px 8px; white-space: nowrap; }
 
 .panel--params { padding-bottom: 16px; }
 .field { display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; align-items: center; padding: 14px 16px 0; }
@@ -244,9 +248,19 @@ html[data-view="analyze"] .view[data-view="analyze"] { display: block; }
 .toggle { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--ink-2); }
 .toggle input { accent-color: var(--auto); }
 
-.segmented { display: flex; border: 1px solid var(--rule); border-radius: var(--r); overflow: hidden; }
-.segmented button { background: var(--surface); border: 0; padding: 6px 14px; font-size: 12.5px; color: var(--ink-3); }
-.segmented button.is-on { background: var(--raised); color: var(--ink); }
+/* The metric picker is the one control that silently changes every number on
+   the page, so it is labelled and outlined rather than left as a bare pair
+   of buttons — it was being missed entirely. */
+.metricpick { display: flex; align-items: center; gap: 9px; padding: 4px 4px 4px 11px;
+  border: 1px solid color-mix(in srgb, var(--auto) 45%, var(--rule)); border-radius: 999px;
+  background: color-mix(in srgb, var(--auto) 8%, transparent); }
+.metricpick__label { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em;
+  text-transform: uppercase; color: var(--ink-2); }
+
+.segmented { display: flex; border: 1px solid var(--rule); border-radius: 999px; overflow: hidden; }
+.segmented button { background: var(--surface); border: 0; padding: 6px 16px; font-size: 12.5px; font-weight: 600; color: var(--ink-3); }
+.segmented button:hover { color: var(--ink); }
+.segmented button.is-on { background: var(--auto); color: #06121F; }
 
 .runs { display: grid; grid-template-columns: repeat(auto-fill, minmax(370px, 1fr)); gap: 14px; }
 
@@ -309,6 +323,81 @@ table.grid-table { border-collapse: collapse; width: 100%; font-family: var(--mo
 .lane__n { font-family: var(--mono); font-size: 11.5px; color: var(--ink-3); }
 
 .empty { color: var(--ink-3); font-size: 14px; padding: 40px 0; text-align: center; }
+
+/* ───────────────────────────── разбор решений агента ── */
+
+.taskfilter { display: flex; align-items: center; gap: 10px; margin: 14px 0 4px; }
+.taskfilter__label { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em;
+  text-transform: uppercase; color: var(--ink-3); }
+.taskfilter select { background: var(--sunken); border: 1px solid var(--rule); border-radius: var(--r);
+  padding: 7px 10px; font-family: var(--mono); font-size: 12.5px; min-width: 320px; }
+
+.logpane__pick { display: block; margin: 12px 0 14px; background: var(--sunken);
+  border: 1px solid var(--rule); border-radius: var(--r); padding: 8px 10px;
+  font-family: var(--mono); font-size: 12.5px; min-width: 340px; max-width: 100%; }
+
+.decision { border: 1px solid var(--rule); border-left: 2px solid var(--wake); border-radius: var(--r);
+  background: var(--sunken); margin-bottom: 10px; }
+.decision--idle { border-left-color: var(--ink-3); }
+.decision__head { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 12px;
+  align-items: center; padding: 10px 13px; cursor: pointer; }
+.decision__at { font-family: var(--mono); font-size: 11px; color: var(--ink-3); white-space: nowrap; }
+.decision__trigger { font-size: 13px; color: var(--ink); }
+.decision__trigger b { color: var(--wake); font-weight: 600; }
+.decision__acts { display: flex; gap: 5px; flex-wrap: wrap; justify-content: flex-end; }
+.act { font-family: var(--mono); font-size: 10.5px; padding: 2px 8px; border-radius: 999px;
+  border: 1px solid var(--rule); color: var(--ink-2); white-space: nowrap; }
+.act--fire { border-color: color-mix(in srgb, var(--wake) 55%, var(--rule)); color: var(--wake); }
+.act--none { color: var(--ink-3); }
+
+.decision__body { display: none; padding: 0 13px 13px; border-top: 1px solid var(--rule-soft); }
+.decision.is-open .decision__body { display: block; }
+.decision__why { margin: 11px 0; font-size: 13px; line-height: 1.55; color: var(--ink); }
+.decision__why em { color: var(--ink-3); font-style: normal; font-family: var(--mono); font-size: 11px;
+  letter-spacing: 0.12em; text-transform: uppercase; display: block; margin-bottom: 4px; }
+.levers { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0; }
+.lever { font-family: var(--mono); font-size: 11.5px; padding: 4px 9px; border-radius: var(--r);
+  background: var(--raised); border: 1px solid var(--rule); }
+.lever b { color: var(--wake); font-weight: 600; }
+.lever--off { color: var(--ink-3); }
+
+.evidence { margin-top: 10px; }
+.evidence__t { font-family: var(--mono); font-size: 11px; letter-spacing: 0.12em;
+  text-transform: uppercase; color: var(--ink-3); margin-bottom: 6px; }
+.tool { border: 1px solid var(--rule-soft); border-radius: var(--r); margin-bottom: 6px; background: var(--surface); }
+.tool > summary { cursor: pointer; padding: 7px 11px; font-family: var(--mono); font-size: 11.5px;
+  color: var(--auto); list-style: none; }
+.tool > summary::-webkit-details-marker { display: none; }
+.tool > summary::before { content: "▸ "; color: var(--ink-3); }
+.tool[open] > summary::before { content: "▾ "; }
+.tool pre { margin: 0; padding: 0 11px 10px; font-family: var(--mono); font-size: 11.5px;
+  line-height: 1.55; color: var(--ink-2); white-space: pre-wrap; overflow-x: auto; }
+
+/* ────────────────────────────────── панель лога ── */
+
+.logpane { position: fixed; inset: auto 0 0 0; height: 62vh; z-index: 50;
+  background: var(--plane); border-top: 1px solid var(--auto);
+  box-shadow: 0 -18px 44px rgba(0,0,0,0.6); display: flex; flex-direction: column; }
+/* `display:flex` beats the hidden attribute's UA rule — restore it explicitly */
+.logpane[hidden] { display: none; }
+.logpane__head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px;
+  padding: 12px 18px; border-bottom: 1px solid var(--rule); }
+.logpane__head h3 { font-size: 17px; }
+.logpane__tools { display: flex; gap: 8px; align-items: center; }
+.logpane__tools input { background: var(--sunken); border: 1px solid var(--rule); border-radius: var(--r);
+  padding: 6px 10px; font-family: var(--mono); font-size: 12px; width: 240px; }
+.logpane__body { overflow: auto; padding: 10px 0 18px; flex: 1; }
+
+.logline { display: grid; grid-template-columns: 66px minmax(0, 1fr); gap: 12px; padding: 1px 18px;
+  font-family: var(--mono); font-size: 11.5px; line-height: 1.5; }
+.logline:hover { background: var(--surface); }
+.logline__n { color: var(--ink-3); text-align: right; user-select: none; }
+.logline__t { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink-2); }
+.logline.is-focus { background: color-mix(in srgb, var(--wake) 14%, transparent); }
+.logline.is-focus .logline__t { color: var(--ink); }
+.logline--agent .logline__t { color: var(--wake); }
+.logline--pred .logline__t { color: var(--auto); }
+.logline--err .logline__t { color: var(--crit); }
 
 /* ───────────────────────────────────────────── tooltip & toast ── */
 

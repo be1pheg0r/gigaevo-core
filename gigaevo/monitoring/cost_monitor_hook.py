@@ -416,6 +416,12 @@ class CostMonitorHook:
             result = self._agent.parse_response(result)
 
             adjustments = result.get("cost_adjustments", {})
+            self._log_agent_trace(tools, trigger, adjustments, before={
+                "cold_start_factor": current_cold,
+                "golden_ratio": current_golden,
+                "growth_rate_mult": current_growth,
+                "concurrency_mult": current_conc_mult,
+            })
             if adjustments:
                 cold = adjustments.get("cold_start_factor", -1)
                 golden = adjustments.get("golden_ratio", -1)
@@ -460,6 +466,70 @@ class CostMonitorHook:
                 ))
         except Exception as e:
             logger.warning("[CostMonitorHook] agent call failed: {}", e)
+
+    def _log_agent_trace(self, tools, trigger: str, adjustments: dict,
+                          before: dict | None = None) -> None:
+        """One JSON line per wakeup: the evidence in, the tool calls out.
+
+        The observability tools are embedded into the prompt rather than
+        called back by the model (see CostMonitorAgent.build_prompt), so
+        nothing downstream could otherwise tell *why* a lever moved — only
+        that it did. This records the same tool outputs the agent was shown,
+        so a wakeup can be re-read after the fact. Emitted even when the
+        agent changed nothing: a monitor that keeps declining is a finding.
+        """
+        def _lever(key: str) -> float:
+            try:
+                return float(adjustments.get(key, -1))
+            except (TypeError, ValueError):
+                return -1.0
+
+        outliers = adjustments.get("flag_outlier_indices", []) or []
+        skip = bool(adjustments.get("skip_calibration", False))
+        levers = {"cold_start_factor": _lever("cold_start_factor"),
+                  "golden_ratio": _lever("golden_ratio"),
+                  "growth_rate_mult": _lever("growth_rate_mult"),
+                  "concurrency_mult": _lever("concurrency_mult")}
+
+        actions = []
+        if any(v > 0 for v in levers.values()):
+            actions.append("adjust_model")
+        if outliers:
+            actions.append("flag_as_outlier")
+        if skip:
+            actions.append("skip_next_calibration")
+
+        def _safe(fn, *args) -> str:
+            try:
+                return str(fn(*args))[:4000]
+            except Exception as exc:  # noqa: BLE001 - a broken tool must not kill the run
+                return f"<unavailable: {exc}>"
+
+        try:
+            trace = {
+                "attempt": self._attempts,
+                "mutant": self._counter,
+                "trigger": trigger,
+                "actions": actions,
+                "levers": levers,
+                # what each lever was before this wakeup, so a reader can say
+                # "changed A from B to C" instead of just "set A to C"
+                "levers_before": before or {},
+                "flag_outlier_indices": list(outliers),
+                "skip_calibration": skip,
+                "reasoning": adjustments.get("reasoning", ""),
+                "evidence": {
+                    "get_trigger": _safe(tools.get_trigger),
+                    "get_progress": _safe(tools.get_progress),
+                    "get_backpressure": _safe(tools.get_backpressure),
+                    "get_model_params": _safe(tools.get_model_params),
+                    "get_last_adjustment_outcome": _safe(tools.get_last_adjustment_outcome),
+                    "get_recent_calls": _safe(tools.get_recent_calls, 15),
+                },
+            }
+            logger.info("[CostMonitorAgentTrace] {}", json.dumps(trace, ensure_ascii=False))
+        except Exception as exc:  # noqa: BLE001 - tracing is never worth a crash
+            logger.warning("[CostMonitorHook] could not write agent trace: {}", exc)
 
     def _flag_outliers(self, call_indices: list[int]) -> None:
         """Turn the agent's flagged CALL indices into flagged bucket positions.

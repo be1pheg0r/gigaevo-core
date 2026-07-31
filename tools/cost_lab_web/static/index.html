@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="en" data-view="launch">
+<html lang="ru" data-view="launch">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Cost Lab — gigaevo forecast console</title>
+<title>Cost Lab — консоль прогнозов gigaevo</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@100,400;100,600;125,700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -18,13 +18,13 @@
   </a>
 
   <div class="repo" id="repo">
-    <span class="repo__skeleton">reading repository…</span>
+    <span class="repo__skeleton">читаю репозиторий…</span>
   </div>
 
-  <nav class="views" role="tablist" aria-label="Views">
-    <button role="tab" data-goto="launch" aria-selected="true">Launch</button>
-    <button role="tab" data-goto="live" aria-selected="false">Live</button>
-    <button role="tab" data-goto="analyze" aria-selected="false">Analyze</button>
+  <nav class="views" role="tablist" aria-label="Разделы">
+    <button role="tab" data-goto="launch" aria-selected="true">Запуск</button>
+    <button role="tab" data-goto="live" aria-selected="false">Наблюдение</button>
+    <button role="tab" data-goto="analyze" aria-selected="false">Разбор</button>
   </nav>
 </header>
 
@@ -32,55 +32,55 @@
 
   <aside class="rail">
     <div class="rail__head">
-      <h2>Experiments</h2>
-      <button class="ghost" id="refresh-experiments" title="Reload the list">Reload</button>
+      <h2>Эксперименты</h2>
+      <button class="ghost" id="refresh-experiments" title="Обновить список">Обновить</button>
     </div>
-    <ol class="explist" id="explist"><li class="explist__empty">Loading…</li></ol>
+    <ol class="explist" id="explist"><li class="explist__empty">Загружаю…</li></ol>
   </aside>
 
   <main class="stage">
 
-    <!-- ─────────────────────────────────────────── LAUNCH ── -->
+    <!-- ─────────────────────────────────────────── ЗАПУСК ── -->
     <section class="view" data-view="launch">
       <div class="masthead">
-        <p class="eyebrow">Ablation</p>
-        <h1>Run the estimator against itself.</h1>
+        <p class="eyebrow">Абляция</p>
+        <h1>Оценщик против самого себя.</h1>
         <p class="lede">
-          Every task launches twice — once with the automatic estimator alone,
-          once with CostMonitorAgent allowed to reach in and move its levers.
-          Same task, same seeds, same wave. The difference is the agent.
+          Каждая задача запускается дважды: один раз с одним автоматическим
+          оценщиком, второй — с агентом, которому разрешено двигать его рычаги.
+          Та же задача, те же сиды, та же волна. Разница — только агент.
         </p>
       </div>
 
       <div class="launch-grid">
         <div class="panel panel--tasks">
           <div class="panel__head">
-            <h3>Tasks</h3>
+            <h3>Задачи</h3>
             <div class="chipbar" id="familybar"></div>
           </div>
           <div class="tasklist" id="tasklist"></div>
         </div>
 
         <div class="panel panel--params">
-          <div class="panel__head"><h3>Parameters</h3></div>
+          <div class="panel__head"><h3>Параметры</h3></div>
 
           <label class="field">
-            <span class="field__label">Mutation attempts per run</span>
+            <span class="field__label">Попыток мутации на прогон</span>
             <input type="range" id="max-mutants" min="10" max="300" step="10" value="100">
             <output class="field__out mono" id="max-mutants-out">100</output>
-            <span class="field__hint">The cap is on attempts, not accepted mutants.</span>
+            <span class="field__hint">Предел считается по попыткам, а не по принятым мутантам.</span>
           </label>
 
           <label class="field">
-            <span class="field__label">Tasks per wave</span>
+            <span class="field__label">Задач в волне</span>
             <input type="range" id="wave-size" min="1" max="8" step="1" value="3">
             <output class="field__out mono" id="wave-size-out">3</output>
-            <span class="field__hint">Each task holds two runs. Oversubscribing the 24 LLM slots
-              queues calls and skews the concurrency the duration model measures.</span>
+            <span class="field__hint">Каждая задача занимает два прогона. Если запросить больше
+              24 слотов LLM, вызовы встанут в очередь и замер конкурентности поплывёт.</span>
           </label>
 
           <label class="field field--inline">
-            <span class="field__label">Model pool</span>
+            <span class="field__label">Пул моделей</span>
             <select id="llm">
               <option value="summer_school_servers">summer_school_servers — 9B + 35B-A3B</option>
               <option value="summer_school_27b">summer_school_27b — 27B dense</option>
@@ -88,46 +88,56 @@
           </label>
 
           <label class="field field--inline">
-            <span class="field__label">Label</span>
+            <span class="field__label">Метка</span>
             <input type="text" id="label" placeholder="alphaevolve" maxlength="40">
           </label>
 
           <div class="ledger" id="ledger"></div>
 
-          <button class="primary" id="start">Start experiment</button>
+          <button class="primary" id="start">Запустить эксперимент</button>
           <p class="launch-note" id="launch-note"></p>
         </div>
       </div>
     </section>
 
-    <!-- ───────────────────────────────────────────── LIVE ── -->
+    <!-- ───────────────────────────────────── НАБЛЮДЕНИЕ ── -->
     <section class="view" data-view="live">
       <div class="view__head">
         <div>
-          <p class="eyebrow" id="live-eyebrow">No experiment selected</p>
-          <h2 id="live-title">Live</h2>
+          <p class="eyebrow" id="live-eyebrow">Эксперимент не выбран</p>
+          <h2 id="live-title">Наблюдение</h2>
         </div>
         <div class="view__actions">
-          <label class="toggle"><input type="checkbox" id="autorefresh" checked><span>Auto-refresh</span></label>
-          <button class="ghost danger" id="stop-exp">Stop runs</button>
+          <div class="metricpick" data-target="live">
+            <span class="metricpick__label">Показатель</span>
+            <div class="segmented" role="group" aria-label="Показатель">
+              <button data-metric="duration" class="is-on">Время</button>
+              <button data-metric="tokens">Токены</button>
+            </div>
+          </div>
+          <label class="toggle"><input type="checkbox" id="autorefresh" checked><span>Автообновление</span></label>
+          <button class="ghost danger" id="stop-exp">Остановить прогоны</button>
         </div>
       </div>
       <div class="runs" id="runs"></div>
     </section>
 
-    <!-- ────────────────────────────────────────── ANALYZE ── -->
+    <!-- ───────────────────────────────────────── РАЗБОР ── -->
     <section class="view" data-view="analyze">
       <div class="view__head">
         <div>
-          <p class="eyebrow" id="an-eyebrow">No experiment selected</p>
-          <h2 id="an-title">Analyze</h2>
+          <p class="eyebrow" id="an-eyebrow">Эксперимент не выбран</p>
+          <h2 id="an-title">Разбор</h2>
         </div>
         <div class="view__actions">
-          <div class="segmented" id="metric-switch" role="group" aria-label="Metric">
-            <button data-metric="duration" class="is-on">Duration</button>
-            <button data-metric="tokens">Tokens</button>
+          <div class="metricpick" data-target="analyze">
+            <span class="metricpick__label">Показатель</span>
+            <div class="segmented" role="group" aria-label="Показатель">
+              <button data-metric="duration" class="is-on">Время</button>
+              <button data-metric="tokens">Токены</button>
+            </div>
           </div>
-          <button class="ghost" id="build-report">Build PNG report</button>
+          <button class="ghost" id="build-report">Скачать архив</button>
         </div>
       </div>
 
@@ -135,6 +145,22 @@
     </section>
 
   </main>
+</div>
+
+<!-- ──────────────────────────────────── просмотр лога ── -->
+<div class="logpane" id="logpane" hidden>
+  <div class="logpane__head">
+    <div>
+      <p class="eyebrow" id="log-eyebrow">лог</p>
+      <h3 id="log-title">Просмотр лога</h3>
+    </div>
+    <div class="logpane__tools">
+      <input type="search" id="log-search" placeholder="искать в логе…" spellcheck="false">
+      <button class="ghost" id="log-tail">В конец</button>
+      <button class="ghost" id="log-close" aria-label="Закрыть">Закрыть</button>
+    </div>
+  </div>
+  <div class="logpane__body" id="log-body"></div>
 </div>
 
 <div class="tooltip" id="tooltip" hidden></div>
