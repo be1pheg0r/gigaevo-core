@@ -632,9 +632,15 @@ function driverPanel(drv, nRuns) {
   }
   p.append(head);
 
-  const pre = el("pre", "driver__log");
-  pre.textContent = (drv.log_lines || []).slice(-14).join("\n") || "(драйвер пока ничего не написал)";
-  p.append(pre);
+  // The driver's log tail is not shown while things are going normally — the
+  // run cards below say everything a healthy launch has to say. It stays for
+  // a FAILED launch, where the tail is the only place the reason exists.
+  if (drv.failed) {
+    const pre = el("pre", "driver__log");
+    pre.textContent = (drv.log_lines || []).slice(-14).join("\n")
+                      || "(драйвер ничего не написал)";
+    p.append(pre);
+  }
   return p;
 }
 
