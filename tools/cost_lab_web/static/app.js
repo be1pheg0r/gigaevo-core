@@ -453,9 +453,8 @@ function renderBudgetAnswer() {
     `<div class="verdict__word" style="color:${color}">${word}</div>` +
     `<div class="verdict__body">` +
       `<div><b>${a.target_attempts}</b> попыток обойдутся примерно в ` +
-      `<b>${compact(a.predicted_tokens)}</b> токенов` +
-      `<span class="mono"> (${compact(a.ci[0])}…${compact(a.ci[1])})</span>,` +
-      ` бюджет — <b>${compact(a.budget_tokens)}</b>.</div>` +
+      `<b>${compact(a.predicted_tokens)}</b> токенов, ` +
+      `бюджет — <b>${compact(a.budget_tokens)}</b>.</div>` +
       `<div class="verdict__hint">Замерено на ${a.observed_attempts} попытках. ` +
       `«Хватает» — только если верхний край интервала укладывается в бюджет.</div>` +
     `</div>`;
