@@ -841,3 +841,46 @@ class TestTailCalibration:
         """Same fraction of two differently sized runs -> same correction."""
         assert (self._hook(10, cap=100)._tail_calibration()
                 == pytest.approx(self._hook(7, cap=70)._tail_calibration(), abs=0.02))
+
+
+class TestProgramSizeProxy:
+    """The `programs` diagnosis needs evidence that programs are growing.
+
+    `_ToolSet` has always accepted baseline/current program length and the
+    hook never passed them, so `get_model_params` read "program_len: 0->0"
+    and half of the prompt's rule 4 was unsatisfiable — across 35 wake-ups
+    the agent picked `programs` zero times. The mutation prompt carries the
+    program source, so its tokens_in is that size up to an offset.
+    """
+
+    def _hook(self) -> CostMonitorHook:
+        pred = CostPrediction(max_mutants=100, max_in_flight=1)
+        return CostMonitorHook(agent=None, prediction=pred, interval=1000)
+
+    def test_growth_in_the_mutation_prompt_is_visible(self) -> None:
+        hook = self._hook()
+        for i in range(20):
+            _call("MutationAgent", 4000 + 50 * i, 10.0)
+        base, cur = hook._program_size_proxy()
+        assert base > 0 and cur > base
+        assert cur / base == pytest.approx(1.2, rel=0.1)
+
+    def test_other_stages_do_not_count(self) -> None:
+        """Only the mutation prompt carries the program."""
+        hook = self._hook()
+        for _ in range(20):
+            _call("MutationSuggestionAgent", 9000, 10.0)
+        assert hook._program_size_proxy() == (0, 0)
+
+    def test_too_few_calls_reports_nothing_rather_than_noise(self) -> None:
+        hook = self._hook()
+        for _ in range(4):
+            _call("MutationAgent", 4000, 10.0)
+        assert hook._program_size_proxy() == (0, 0)
+
+    def test_a_flat_run_shows_no_growth(self) -> None:
+        hook = self._hook()
+        for _ in range(20):
+            _call("MutationAgent", 4000, 10.0)
+        base, cur = hook._program_size_proxy()
+        assert base == cur == 4000

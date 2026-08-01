@@ -496,6 +496,34 @@ class CostMonitorHook:
             return None
         return dur_done - tok_done
 
+    def _program_size_proxy(self) -> tuple[int, int]:
+        """(baseline, current) program size, in MutationAgent prompt tokens.
+
+        The `programs` diagnosis needs evidence that the evolved programs are
+        growing, and until now there was none: ``_ToolSet`` accepts
+        ``baseline_program_len``/``current_program_len`` and the hook never
+        passed them, so ``get_model_params`` always read ``program_len: 0->0``
+        and ``get_program_diff`` always read "(none)". Half of the prompt's
+        rule 4 was unsatisfiable, and across 35 wake-ups the agent picked
+        `programs` zero times.
+
+        The mutation prompt carries the program source, so its ``tokens_in``
+        IS the program size up to a constant offset. Measured on the 7 clean
+        2026-08-01 runs it grows +3% to +31% over a run (median +10%), so the
+        signal is real and needs no new event field or plumbing — it is
+        already in ``_call_history``.
+
+        ponytail: a proxy, not the source. It moves with the prompt template
+        as well as with the program; wire the real length through
+        MutationAttempted if the distinction ever matters.
+        """
+        ins = [r.tokens_in for r in self._call_history
+               if r.stage == "MutationAgent" and r.tokens_in]
+        if len(ins) < 8:
+            return 0, 0
+        k = max(len(ins) // 4, 2)
+        return int(statistics.median(ins[:k])), int(statistics.median(ins[-k:]))
+
     def _tail_calibration(self) -> float:
         """Interpolate TAIL_CALIBRATION at the run's current progress.
 
@@ -844,6 +872,7 @@ class CostMonitorHook:
             bp_in_flight, bp_max_in_flight = self._last_bp.in_flight, self._last_bp.max_in_flight
         else:
             bp_util, bp_in_flight, bp_max_in_flight = 0.8, 0, 8
+        base_len, cur_len = self._program_size_proxy()
         tools = _ToolSet(
             recent_calls=self._call_history[-20:],
             backpressure_util=bp_util,
@@ -864,6 +893,8 @@ class CostMonitorHook:
             miscoverage_rate=(self._miscoverages / self._flushes) if self._flushes else None,
             miscoverage_target=self._aci_alpha,
             width_scale=self._aci_scale,
+            baseline_program_len=base_len,
+            current_program_len=cur_len,
         )
         self._agent.tools = tools
 
