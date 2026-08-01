@@ -64,30 +64,57 @@ class TestEveryToolReachesTheModel:
         """The system prompt tells the agent to consult these by name; the
         tools are not callable, so anything named must be in the user turn."""
         text = _agent(_tools()).build_prompt({"messages": []})[1].content
-        for tool in ("get_trigger", "get_progress", "get_last_adjustment_outcome"):
+        for tool in ("get_last_adjustment_outcome",):
             assert tool in SYSTEM_PROMPT, f"{tool} no longer referenced — update this test"
         assert "WHY YOU ARE AWAKE" in text
         assert "YOUR PREVIOUS DECISION" in text
 
 
-class TestConcurrencyLeverIsWired:
-    def test_concurrency_mult_survives_parse_response(self) -> None:
+class TestCauseChoosesTheLever:
+    """The agent names a cause; the mapping to a lever is not its choice."""
+
+    def test_servers_reaches_the_divisor_and_nothing_else(self) -> None:
         a = _agent(_tools())
         out = a.parse_response({"llm_response": _Resp(
-            '{"cold_start_factor": -1, "golden_ratio": -1, "growth_rate_mult": -1, '
-            '"concurrency_mult": 0.8, "flag_outlier_indices": [], '
-            '"skip_calibration": false, "reasoning": "server contention"}')})
+            '{"cause": "servers", "magnitude": 0.8, "reasoning": "contention"}')})
         adj = out["cost_adjustments"]
         assert adj["concurrency_mult"] == 0.8
         assert adj["golden_ratio"] == -1, "must not silently reach for the wrong lever"
+        assert adj["growth_rate_mult"] == -1
+        assert adj["cause"] == "servers"
 
-    def test_the_json_shape_offered_to_the_model_lists_it(self) -> None:
+    def test_programs_reaches_the_growth_rate(self) -> None:
+        out = _agent(_tools()).parse_response({"llm_response": _Resp(
+            '{"cause": "programs", "magnitude": 1.4, "sustained_over_calls": 7}')})
+        adj = out["cost_adjustments"]
+        assert adj["growth_rate_mult"] == 1.4 and adj["concurrency_mult"] == -1
+        assert adj["sustained_over_calls"] == 7
+
+    def test_task_reaches_the_flat_margin(self) -> None:
+        out = _agent(_tools()).parse_response({"llm_response": _Resp(
+            '{"cause": "task", "magnitude": 1.3, "sustained_over_calls": 9}')})
+        assert out["cost_adjustments"]["golden_ratio"] == 1.3
+
+    def test_noise_moves_nothing(self) -> None:
+        adj = _agent(_tools()).parse_response({"llm_response": _Resp(
+            '{"cause": "noise", "magnitude": -1, "reasoning": "one spike"}')})["cost_adjustments"]
+        assert adj["golden_ratio"] == adj["growth_rate_mult"] == adj["concurrency_mult"] == -1
+
+    def test_an_unknown_cause_is_read_as_noise(self) -> None:
+        adj = _agent(_tools()).parse_response({"llm_response": _Resp(
+            '{"cause": "solar flares", "magnitude": 2.0}')})["cost_adjustments"]
+        assert adj["cause"] == "noise"
+        assert adj["concurrency_mult"] == -1
+
+    def test_the_json_shape_offered_to_the_model_asks_for_a_cause(self) -> None:
         text = _agent(_tools()).build_prompt({"messages": []})[1].content
-        assert '"concurrency_mult"' in text
+        assert '"cause"' in text and '"magnitude"' in text
+        assert "flag_outlier_indices" not in text, "the flag action was removed"
 
     def test_out_of_range_values_are_refused(self) -> None:
         a = _agent(_tools())
-        out = a.parse_response({"llm_response": _Resp('{"concurrency_mult": 42}')})
+        out = a.parse_response({"llm_response": _Resp(
+            '{"cause": "servers", "magnitude": 42}')})
         assert out["cost_adjustments"]["concurrency_mult"] == -1
 
 

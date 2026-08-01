@@ -697,3 +697,103 @@ class TestBudgetMode:
         narrow = hook.project_tokens(100, alpha=0.5)[1]
         assert wide != narrow
         assert hook.project_tokens(100)[1] == wide          # still the wide one
+
+
+class TestUnitProjection:
+    """`_project_units` — how many times a stage will still fire.
+
+    Measured on the 2026-08-01 logs: undercounting this was 21 of the 24
+    percentage points of the estimator's low bias at 10% progress, so it is
+    the single term worth getting right.
+    """
+
+    def _hook(self) -> CostMonitorHook:
+        pred = CostPrediction(max_mutants=100, max_in_flight=1)
+        return CostMonitorHook(agent=None, prediction=pred, interval=1000)
+
+    def test_a_flat_stage_projects_its_flat_rate(self) -> None:
+        hook = self._hook()
+        for i in range(10):
+            _call("flat", 100, 10.0)
+            emit(MutationAttempted(mutant_id=f"m{i}"))
+        # one bucket per attempt -> 100 attempts, ~100 firings
+        assert hook._project_units("flat", 10, 100) == pytest.approx(100, rel=0.05)
+
+    def test_a_climbing_stage_is_not_projected_at_its_early_rate(self) -> None:
+        """The real case: MutationSuggestionAgent runs at 0.12/attempt early
+        and 0.33 by the end. A cumulative average lags that by construction."""
+        hook = self._hook()
+        for i in range(20):
+            # silent for the first half, then every attempt
+            if i >= 10:
+                _call("climbing", 100, 10.0)
+            _call("flat", 100, 10.0)          # keeps the attempt clock moving
+            emit(MutationAttempted(mutant_id=f"m{i}"))
+
+        seen = len(hook._tokens_by_stage["climbing"])
+        cumulative = round(seen * 100 / hook._attempts)   # what the old code did
+        projected = hook._project_units("climbing", seen, 100)
+        assert projected > cumulative, (projected, cumulative)
+        # trailing rate is ~1/attempt, so ~10 seen + ~80 remaining
+        assert projected == pytest.approx(90, rel=0.15)
+
+    def test_it_never_projects_fewer_than_already_seen(self) -> None:
+        hook = self._hook()
+        for i in range(10):
+            _call("s", 100, 10.0)
+            emit(MutationAttempted(mutant_id=f"m{i}"))
+        # a horizon already passed cannot un-fire calls
+        assert hook._project_units("s", 10, 5) >= 10
+
+    def test_an_unknown_stage_falls_back_to_the_cumulative_rate(self) -> None:
+        hook = self._hook()
+        for i in range(4):
+            emit(MutationAttempted(mutant_id=f"m{i}"))
+        assert hook._project_units("never-fired", 2, 100) >= 2
+
+
+class TestDisagreementDoesNotFeedOnItself:
+    """The token/clock gap must be read off the UNADJUSTED model.
+
+    Measured on the first live bench: the agent lowered the concurrency
+    multiplier, which raised predicted duration, which lowered clock
+    progress, which widened the gap that woke it — 19 of 20 moves downward,
+    ratcheting 0.65 -> 0.30. A trigger driven by its own response is a
+    control loop, not a signal.
+    """
+
+    def _hook(self) -> CostMonitorHook:
+        pred = CostPrediction(max_mutants=100, max_in_flight=1)
+        hook = CostMonitorHook(agent=None, prediction=pred, interval=1000)
+        for i in range(10):
+            _call("A", 1000, 100.0, tokens_out=100)
+            emit(MutationAttempted(mutant_id=f"m{i}"))
+        pred.predicted_total_tokens = 40_000      # 11k observed -> ~27% done
+        return hook
+
+    def test_the_gap_ignores_the_agents_own_concurrency_move(self) -> None:
+        hook = self._hook()
+        # 1000s predicted, 300s elapsed -> clock says 30% done
+        base = hook._progress_disagreement(1000.0, 300.0)
+        assert base is not None
+
+        # The agent halves the concurrency multiplier. The live model would
+        # then predict a longer run (the remaining term doubles), and the gap
+        # must NOT move as a result.
+        hook._pred.llm_concurrency_override = 0.5
+        stretched = 300.0 + (1000.0 - 300.0) / 0.5
+        assert hook._progress_disagreement(stretched, 300.0) == pytest.approx(base, abs=1e-9)
+
+    def test_the_gap_ignores_the_blunt_levers_too(self) -> None:
+        hook = self._hook()
+        base = hook._progress_disagreement(1000.0, 300.0)
+        hook._pred.llm_golden_override = 1.5
+        inflated = 300.0 + (1000.0 - 300.0) * 1.5
+        assert hook._progress_disagreement(inflated, 300.0) == pytest.approx(base, abs=1e-9)
+
+    def test_a_real_divergence_still_registers(self) -> None:
+        """Undoing the levers must not flatten the signal itself."""
+        hook = self._hook()
+        near = hook._progress_disagreement(1000.0, 300.0)
+        far = hook._progress_disagreement(1000.0, 800.0)   # clock much further on
+        assert far > near

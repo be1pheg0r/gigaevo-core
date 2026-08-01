@@ -1,9 +1,10 @@
 """CostMonitorAgent — LLM-powered cost model adjuster.
 
 Woken by CostMonitorHook when the live estimate breaches the confidence
-interval its own previous estimate published (not on a fixed tick), and
-decides whether that surprise is a transient outlier or a regime change.
-Returns structured adjustments consumed by ``CostMonitorHook``.
+interval its own previous estimate published, or when token progress and
+clock progress disagree. Names the CAUSE of the deviation (servers /
+programs / task / noise); each cause drives exactly one lever, which
+CostMonitorHook then gates, clamps and damps as before.
 
 Tool set
 --------
@@ -15,7 +16,6 @@ get_progress()               — attempts, measured elapsed vs predicted remaini
 get_trigger()                — why this call was woken up
 get_last_adjustment_outcome()— previous decision and what the estimate did since
 adjust_model(params)         — apply corrections to the live cost model
-flag_as_outlier(idx)         — winsorise that call's bucket out of the growth fit
 
 """
 from __future__ import annotations
@@ -35,66 +35,68 @@ from gigaevo.llm.agents.base import LangGraphAgent
 
 SYSTEM_PROMPT = (
     "You are a **Cost Monitor Agent** for an evolutionary code optimisation "
-    "pipeline.  You are NOT on a timer: you are woken up when the estimator "
-    "surprises itself — its new estimate landed outside the confidence "
-    "interval its own previous estimate published.  `get_trigger()` tells you "
-    "what happened.  Your job is to explain that specific event: is it a "
-    "**transient outlier** (one slow or huge call — flag it, leave the model "
-    "alone) or a **regime change** (programs grew, model switched, servers "
-    "slowed — correct the model)?\n\n"
-    "Default to 'transient'.  Flagging an outlier is cheap and surgical: the "
-    "flagged call's bucket is winsorised out of the growth-law fit, so a spike "
-    "stops being extrapolated over the whole remaining run, and nothing else "
-    "changes.  Moving a multiplier is blunt — it applies to everything still "
-    "ahead — so only do it when the deviation has PERSISTED across several "
-    "calls, and say so in `reasoning`.\n\n"
-    "`get_last_adjustment_outcome()` shows what you did last time and where "
-    "the estimate went afterwards.  If your last correction pushed the "
-    "estimate the wrong way, undo it rather than compounding it.\n\n"
-    "`get_progress()` gives the two measured terms of the estimate and the "
-    "measured concurrency.  Every tool's output is already written out for "
-    "you below — you cannot call them, so work only from what is shown.\n\n"
-    "Calls marked ALREADY FLAGGED have been winsorised out of the fit "
-    "already.  Do not flag them again: it changes nothing and spends a "
-    "wakeup.  Your own calls do not appear in this telemetry at all.\n\n"
-    "## How the estimate you are correcting is built\n"
+    "pipeline.  A statistical estimator forecasts what the run will cost; it "
+    "is good at extrapolating trends and blind to WHY a trend changed.  That "
+    "is your entire job: name the CAUSE of the deviation you were woken for. "
+    "You are not asked what happened — the estimator already measured that. "
+    "You are asked what is behind it.\n\n"
+    "## Why you no longer flag outliers\n"
+    "Marking single slow calls as outliers used to be your main action (18 of "
+    "20 wakeups).  It was measured on 7 recorded runs and it made the forecast "
+    "WORSE on every one of them.  Two reasons: the growth law is a Theil-Sen "
+    "fit that already tolerates ~29% contaminated points, and the estimator "
+    "runs about 25% BELOW the truth at a quarter of the way in — removing the "
+    "high calls pushes it further down.  A spike that already happened is real "
+    "cost.  Do not try to explain spikes away; explain what is CAUSING them.\n\n"
+    "## The one question\n"
+    "Pick exactly one `cause`:\n"
+    "- `servers` — the infrastructure got slower or faster.  Latency moved "
+    "while tokens_out did not; or achieved concurrency fell away from "
+    "max_in_flight.  The work did not change, the machine did.\n"
+    "- `programs` — the evolved programs themselves got bigger or more "
+    "expensive.  tokens_out trending up across recent calls, program length "
+    "grown against baseline.  Every remaining call will carry this.\n"
+    "- `task` — this problem is structurally costlier than the early calls "
+    "suggested (long validation, heavy retries), so the whole remaining run "
+    "needs more margin, not a faster/slower trend.\n"
+    "- `noise` — nothing durable is happening.  One odd call, or a spike that "
+    "has already passed.  **This is the correct answer most of the time.**\n\n"
+    "Then give `magnitude`: how much that cause moves the model, as a "
+    "multiplier.  >1 means more cost / slower; <1 means less cost / faster. "
+    "Use -1 for `noise`.  Each cause drives exactly one lever, chosen for you:\n"
+    "- `servers` scales the measured concurrency divisor (0.3–3.0).  Slower "
+    "servers = magnitude below 1.\n"
+    "- `programs` scales the fitted growth rate of remaining work (0.5–3.0)\n"
+    "- `task` scales a flat safety margin on remaining work (0.8–2.0)\n\n"
+    "`programs` and `task` are blunt — they apply to everything still ahead — "
+    "so they need `sustained_over_calls`: over how many recent calls the "
+    "deviation actually held.  Below 5 the change is refused.  `servers` needs "
+    "no persistence claim: a contention change is immediate.\n\n"
+    "## What you are correcting\n"
     "`predicted_duration = elapsed_so_far + remaining_service_time / "
     "achieved_concurrency`.  `elapsed_so_far` is measured, not guessed — your "
-    "levers only ever scale the REMAINING work or the concurrency divisor, "
-    "never wall time already spent.  `achieved_concurrency` is measured over "
-    "a trailing window: it is how many LLM calls the system really runs at "
-    "once, which is NOT the same as max_in_flight (that is the DAG mutant "
-    "dispatch cap).\n\n"
-    "## Available actions (via JSON output)\n"
-    "- `golden_ratio`: float 0.8–2.0 — safety margin on remaining work\n"
-    "- `growth_rate_mult`: float 0.5–3.0 — remaining work will grow/shrink "
-    "faster than the fitted trend (compounds with golden_ratio)\n"
-    "- `concurrency_mult`: float 0.3–3.0 — the measured concurrency is about "
-    "to change (>1 = throughput recovering, <1 = servers slowing down). Use "
-    "this instead of golden_ratio when the cause is the SERVERS, not the "
-    "programs — it is the only lever that touches the divisor\n"
-    "- `flag_outlier_indices`: list[int] — mark these call indices as outliers\n"
-    "- `sustained_over_calls`: int — REQUIRED whenever you set golden_ratio or "
-    "growth_rate_mult: over how many recent calls the deviation actually held. "
-    "Below 5 the change is refused, because a blunt lever must not answer a "
-    "single spike\n"
-    "- `skip_calibration`: bool — skip the next scheduled calibration\n"
-    "- `reasoning`: string ≤ 80 chars — why you made these decisions\n\n"
-    "## Decision rules\n"
-    "0. A call marked SLOW is 2.5×+ the median LATENCY of the window; tokens "
-    "in this system barely vary, so judge spikes on latency, not size\n"
-    "1. Single-call spike (one call 3× median, rest normal) → flag outlier\n"
-    "2. Sustained token growth (last 5 calls trending up) → raise growth_rate_mult\n"
-    "3. Latency rising while tokens_out flat → server contention, lower "
-    "concurrency_mult (do NOT raise golden_ratio: the work did not grow)\n"
-    "4. Achieved concurrency far below max_in_flight AND the pipeline is "
-    "starved (in_flight low, few accepts) → concurrency will stay low, "
-    "lower concurrency_mult\n"
-    "5. Achieved concurrency climbing across the window → run is still ramping "
-    "up, raise concurrency_mult slightly\n"
-    "6. Program length grew > 20 % vs baseline → raise growth_rate_mult by 0.2\n"
-    "7. Everything normal → no changes (all defaults). Prefer no change: the "
-    "measured terms are usually right, and every lever you move adds variance.\n"
+    "lever only ever scales the REMAINING work or the concurrency divisor, "
+    "never wall time already spent.  `achieved_concurrency` is measured over a "
+    "trailing window: how many LLM calls the system really runs at once, which "
+    "is NOT max_in_flight (that is the DAG mutant dispatch cap).\n\n"
+    "`get_last_adjustment_outcome()` shows what you did last time and where "
+    "the estimate went afterwards.  If your last correction pushed the "
+    "estimate the wrong way, reverse it rather than compounding it.  Every "
+    "tool's output is written out below — you cannot call them, so work only "
+    "from what is shown.  Your own calls are not in this telemetry.\n\n"
+    "## Deciding\n"
+    "0. Judge on LATENCY, not token size — tokens barely vary in this system\n"
+    "1. Latency moved, tokens_out flat → `servers`\n"
+    "2. Achieved concurrency far below max_in_flight and the pipeline is "
+    "starved → `servers`, magnitude below 1\n"
+    "3. Achieved concurrency climbing across the window → `servers`, "
+    "magnitude slightly above 1\n"
+    "4. tokens_out trending up across the last 5+ calls, or program length "
+    "grown >20% vs baseline → `programs`\n"
+    "5. Costs uniformly higher than the early calls implied, with no trend and "
+    "no server story → `task`\n"
+    "6. A single spike, or anything you cannot attribute → `noise`.  Prefer "
+    "this: the measured terms are usually right and every lever adds variance.\n"
 )
 
 
@@ -115,13 +117,27 @@ class LlmCallRecord:
         )
 
 
+# Which lever each cause is allowed to move. The agent names a cause, not a
+# lever: naming the lever was a free choice over three multipliers plus an
+# outlier list, and the model spent 18 of 20 wakeups on the outlier list —
+# the one action measured to make the forecast worse. A cause has exactly one
+# lever, so a wrong answer is a wrong DIAGNOSIS, which is inspectable, rather
+# than an arbitrary nudge that is not.
+CAUSE_LEVER = {
+    "servers": "concurrency_mult",     # the only lever on the divisor
+    "programs": "growth_rate_mult",    # remaining work grows faster than fitted
+    "task": "golden_ratio",            # flat margin on remaining work
+    "noise": None,                     # no lever; the correct answer most times
+}
+# Causes whose lever applies to everything still ahead, so they must be backed
+# by a persistence claim. A server contention change is immediate and is not.
+BLUNT_CAUSES = frozenset({"programs", "task"})
+
+
 class _AdjustmentOutput(BaseModel):
-    golden_ratio: float = Field(default=-1.0, description="Override golden_ratio (−1 = no change, 0.8–2.0)")
-    growth_rate_mult: float = Field(default=-1.0, description="Multiply growth_rate γ (−1 = no change, 0.5–3.0)")
-    concurrency_mult: float = Field(default=-1.0, description="Multiply MEASURED achieved LLM concurrency (−1 = no change, 0.3–3.0)")
-    flag_outlier_indices: list[int] = Field(default_factory=list, description="Indices of calls to ignore")
-    sustained_over_calls: int = Field(default=0, description="Calls the deviation held for; <5 refuses golden/growth")
-    skip_calibration: bool = Field(default=False)
+    cause: str = Field(default="noise", description="servers | programs | task | noise")
+    magnitude: float = Field(default=-1.0, description="Multiplier for the cause's lever (−1 = no change)")
+    sustained_over_calls: int = Field(default=0, description="Calls the deviation held for; <5 refuses programs/task")
     reasoning: str = Field(default="")
 
 
@@ -417,15 +433,13 @@ class CostMonitorAgent(LangGraphAgent):
 
         user = HumanMessage(content=(
             f"{context}\n\n"
-            "Analyse the telemetry above and answer the trigger specifically. "
-            "Respond with a JSON object:\n"
-            '{"golden_ratio": float, "growth_rate_mult": float, '
-            '"concurrency_mult": float, "flag_outlier_indices": [int], '
-            '"sustained_over_calls": int, '
-            '"skip_calibration": bool, "reasoning": "..."}\n\n'
-            "Use -1 for any parameter you do NOT want to change. Changing "
-            "nothing (every value -1, no indices) is a valid and often correct "
-            "answer — say why in `reasoning`."
+            "Name the CAUSE behind the trigger above. Respond with a JSON "
+            "object:\n"
+            '{"cause": "servers" | "programs" | "task" | "noise", '
+            '"magnitude": float, "sustained_over_calls": int, '
+            '"reasoning": "..."}\n\n'
+            '"noise" with magnitude -1 changes nothing and is a valid, common '
+            "and often correct answer — say why in `reasoning`."
         ))
         return [SystemMessage(content=SYSTEM_PROMPT), user]
 
@@ -445,31 +459,35 @@ class CostMonitorAgent(LangGraphAgent):
         except (json.JSONDecodeError, Exception):
             return state
 
-        # Apply adjustments
+        # One cause in, one lever out. Everything downstream (the deadband,
+        # the step clamp, the reversal damping, the persistence gate) is the
+        # hook's existing machinery and is reached through the same keys as
+        # before — only the way the lever gets CHOSEN has changed.
         tools = self._tools
-        golden = data.get("golden_ratio", -1)
-        growth = data.get("growth_rate_mult", -1)
-        # concurrency_mult used to be dropped here — not passed to adjust_model
-        # and not copied into cost_adjustments — while the system prompt calls
-        # it "the only lever that touches the divisor" and three of the seven
-        # decision rules require it. The agent diagnosed server contention
-        # correctly and then had to reach for golden_ratio, which the prompt
-        # explicitly forbids in that case.
-        conc = data.get("concurrency_mult", -1)
-        outliers = data.get("flag_outlier_indices", [])
-        skip = data.get("skip_calibration", False)
+        cause = str(data.get("cause", "noise")).strip().lower()
+        if cause not in CAUSE_LEVER:
+            cause = "noise"
+        try:
+            magnitude = float(data.get("magnitude", -1))
+        except (TypeError, ValueError):
+            magnitude = -1.0
         reasoning = data.get("reasoning", "")
 
-        tools.adjust_model(golden_ratio=golden, growth_rate_mult=growth,
-                           concurrency_mult=conc)
+        levers = {"golden_ratio": -1.0, "growth_rate_mult": -1.0, "concurrency_mult": -1.0}
+        lever = CAUSE_LEVER[cause]
+        if lever is not None and magnitude > 0:
+            levers[lever] = magnitude
 
-        for idx in outliers:
-            tools.flag_as_outlier(idx)
-
-        if skip:
-            tools.skip_next_calibration()
+        tools.adjust_model(golden_ratio=levers["golden_ratio"],
+                           growth_rate_mult=levers["growth_rate_mult"],
+                           concurrency_mult=levers["concurrency_mult"])
+        skip = False
+        golden, growth, conc = (levers["golden_ratio"], levers["growth_rate_mult"],
+                                levers["concurrency_mult"])
+        outliers: list[int] = []
 
         state["cost_adjustments"] = {
+            "cause": cause,
             "golden_ratio": tools.adjustments.get("golden_ratio", -1),
             "growth_rate_mult": tools.adjustments.get("growth_rate_mult", -1),
             "concurrency_mult": tools.adjustments.get("concurrency_mult", -1),

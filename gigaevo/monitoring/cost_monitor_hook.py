@@ -92,6 +92,7 @@ class CostMonitorHook:
         ci_method: str | None = None,
         aci_alpha: float = 0.10,
         aci_gamma: float = 0.05,
+        disagreement_gap: float = 0.15,
     ):
         self._agent = agent
         self._pred = prediction
@@ -160,6 +161,19 @@ class CostMonitorHook:
         self._last_adjustment: dict | None = None
         self._max_agent_calls = max_agent_calls
         self._cooldown_attempts = cooldown_attempts
+        # How far the token and clock projections must part before the agent
+        # is worth waking. Set from the data: over 258 flushes on the 7 clean
+        # logs the gap has median 3.6% and p99 14.1%, so 0.15 fires on the
+        # genuine tail and not on jitter.
+        #
+        # Honest limitation: these two projections are less independent than
+        # the idea wants. Both are built from the same per-stage call buckets
+        # (tokens from tokens_in+out, the clock from a TTFT/TPOT model over
+        # tokens_out plus non-LLM stage time), so they mostly move together
+        # and this fires about twice per seven runs. It is kept because it
+        # asks a question the CI breach cannot — a server collapse moves the
+        # clock without moving the tokens — not because it fires often.
+        self._disagreement_gap = disagreement_gap
         self._warmup_attempts = warmup_attempts
         self._min_leverage = min_leverage
         # Online interval calibration (see _update_aci). alpha is the target
@@ -181,6 +195,8 @@ class CostMonitorHook:
         self._flagged_calls: set[int] = set()
         # lever name -> (direction of last accepted move, wakeup it happened on)
         self._lever_dir: dict[str, tuple[int, int]] = {}
+        # stage -> attempt index of every bucket it produced; see _project_units.
+        self._bucket_attempts: dict[str, list[int]] = {}
         # (horizon, alpha) -> (tokens, ci); see project_tokens. Dropped on flush.
         self._projection_memo: dict[tuple[int, float], tuple[float, tuple[float, float]]] = {}
         subscribe(LLMCall.event, self._on_llm_call)
@@ -380,6 +396,27 @@ class CostMonitorHook:
             self._agent_due = True
             self._trigger_reason = f"first look after {self._attempts} attempts"
             return
+        # Disagreement between the two independent projections beats the
+        # estimator's own surprise as a wake condition. A CI breach hands the
+        # agent the very spike that caused it — measured on the 2026-08-01
+        # logs, 18 of 20 wakeups ended in "flag that spike", which the
+        # estimator's Theil-Sen fit already tolerates and which made the
+        # forecast WORSE (0 of 7 tasks improved). Token progress and clock
+        # progress, by contrast, are built from different quantities: when
+        # they part company the cause is outside either model — servers
+        # slowing (clock runs ahead of tokens) or programs growing (tokens run
+        # ahead of the clock) — and that is a question only the agent can
+        # answer.
+        gap = self._progress_disagreement(duration_s, elapsed)
+        if gap is not None and abs(gap) >= self._disagreement_gap:
+            self._agent_due = True
+            lag = "clock" if gap > 0 else "tokens"
+            self._trigger_reason = (
+                f"token progress and clock progress disagree by {abs(gap):.0%} at attempt "
+                f"{self._attempts} ({lag} is ahead) — one of them is measuring "
+                f"something the other cannot see"
+            )
+            return
         if miscovered and prev:
             direction = "above" if duration_s > prev[1] else "below"
             self._agent_due = True
@@ -387,6 +424,80 @@ class CostMonitorHook:
                 f"estimate jumped {direction} its own interval at attempt "
                 f"{self._attempts}: {duration_s:.0f}s vs [{prev[0]:.0f}, {prev[1]:.0f}]s"
             )
+
+    def _progress_disagreement(self, duration_s: float, elapsed_s: float) -> float | None:
+        """How far apart the two projections put this run, in fraction of done.
+
+        Tokens say ``observed / predicted_total``; the clock says
+        ``elapsed / predicted_duration``. Both answer "how much of the run is
+        behind us", from different measurements. Positive means the clock is
+        ahead of the tokens (time is going faster than work — servers), and
+        negative the reverse (work is growing faster than time — programs).
+
+        Measured on the UNADJUSTED duration, with the agent's own multipliers
+        divided back out. Without that this trigger feeds on its own response:
+        the agent lowers the concurrency multiplier, which raises predicted
+        duration, which lowers clock progress, which widens the very gap that
+        woke it. Observed on the first live bench run — 19 of 20 concurrency
+        moves were downward and ratcheted 0.65 -> 0.45 -> 0.35 -> 0.30, with
+        15 of 49 wake-ups citing the disagreement they had just deepened. A
+        trigger driven by its own correction is a control loop, not a signal.
+
+        None while either projection is too thin to compare.
+        """
+        observed = sum(sum(v) for v in self._tokens_by_stage.values())
+        total = self._pred.predicted_total_tokens
+        if not (total > 0 and duration_s > 0 and observed > 0):
+            return None
+
+        # Undo the levers: remaining work scales with tail_mult and inversely
+        # with the concurrency multiplier, so multiplying the remaining term
+        # by conc/tail recovers what the model would have said untouched.
+        conc = self._pred.llm_concurrency_override
+        conc = conc if 0.3 <= conc <= 3.0 else 1.0
+        tail = 1.0
+        if 0.5 <= self._pred.llm_golden_override <= 2.0:
+            tail *= self._pred.llm_golden_override
+        if 0.3 <= self._pred.llm_growth_override <= 3.0:
+            tail *= self._pred.llm_growth_override
+        raw_duration = elapsed_s + max(duration_s - elapsed_s, 0.0) * conc / max(tail, 1e-6)
+        if raw_duration <= 0:
+            return None
+
+        tok_done = observed / total
+        dur_done = elapsed_s / raw_duration
+        if not (0.0 < tok_done <= 1.0 and 0.0 < dur_done <= 1.0):
+            return None
+        return dur_done - tok_done
+
+    def _project_units(self, stage: str, seen: int, horizon: int) -> int:
+        """How many times this stage will have fired by attempt ``horizon``.
+
+        Rate is measured over the RECENT half of the run, not over all of it.
+        Stages do not fire at a constant rate: measured on
+        `packing_circles/n_26` (2026-08-01), ``MutationSuggestionAgent`` runs
+        at 0.12 firings per attempt over the first quarter and 0.33 by the
+        end — it needs an archive to suggest from, so it climbs and saturates.
+        ``MutationAgent`` is flat at ~0.95 and is unaffected by which window
+        is used.
+
+        A cumulative average lags a climbing rate by construction, and the
+        whole estimate inherits that: on the 7 clean logs the undercount of
+        future calls was 21 of the 24 percentage points of the estimator's
+        low bias at 10% progress (8 of 14 at 25%). The tail-per-call model
+        was close to unbiased all along.
+
+        ponytail: a trailing window, not a fitted saturation curve. It removes
+        the lag without claiming to know the shape; fit one if the residual
+        bias turns out to be worth another parameter.
+        """
+        hist = self._bucket_attempts.get(stage) or []
+        rate = seen / max(self._attempts, 1)
+        if len(hist) >= 4 and self._attempts >= 4:
+            lo = self._attempts // 2
+            span = max(self._attempts - lo, 1)
+            rate = max(rate, sum(1 for a in hist if a > lo) / span)
+        return max(1, round(seen + rate * max(horizon - self._attempts, 0)))
 
     def _flush_mutant_bucket(self) -> None:
         """Sum calls since the last flush per stage, refit the growth law,
@@ -410,6 +521,7 @@ class CostMonitorHook:
             stage_tokens_out[rec.stage] = stage_tokens_out.get(rec.stage, 0.0) + rec.tokens_out
             stage_latency[rec.stage] = stage_latency.get(rec.stage, 0.0) + rec.latency_ms
         for stage, tokens in stage_tokens.items():
+            self._bucket_attempts.setdefault(stage, []).append(self._attempts)
             self._tokens_by_stage.setdefault(stage, []).append(tokens)
             self._tokens_out_by_stage.setdefault(stage, []).append(stage_tokens_out[stage])
             self._latency_by_stage.setdefault(stage, []).append(stage_latency[stage])
@@ -425,23 +537,15 @@ class CostMonitorHook:
             for stage, duration_ms in new_stage_execs:
                 nonllm_stage_totals[stage] = nonllm_stage_totals.get(stage, 0.0) + duration_ms
             for stage, total_ms in nonllm_stage_totals.items():
+                self._bucket_attempts.setdefault(stage, []).append(self._attempts)
                 self._nonllm_duration_by_stage.setdefault(stage, []).append(total_ms)
 
-        # Extrapolate each stage's total firing count from its observed
-        # rate-per-attempt so far (some stages skip-cascade and don't fire
-        # on every attempt — see lineage_memory_pipeline.py archive gating).
-        # ``self._attempts`` is the flush-cadence denominator (buckets track
-        # attempts via ``_on_mutation_attempted`` above), so this projects
-        # directly against ``max_mutants`` (attempts cap) with no
-        # accept-rate correction needed. Falls back to a denominator of 1
-        # when no attempts have been observed yet (e.g. tests that emit
-        # LLM_CALL without MUTATION_ATTEMPTED).
         total_units_by_stage = {
-            stage: max(1, round(self._pred.max_mutants * len(series) / max(self._attempts, 1)))
+            stage: self._project_units(stage, len(series), self._pred.max_mutants)
             for stage, series in self._tokens_by_stage.items()
         }
         total_units_by_stage.update({
-            stage: max(1, round(self._pred.max_mutants * len(series) / max(self._attempts, 1)))
+            stage: self._project_units(stage, len(series), self._pred.max_mutants)
             for stage, series in self._nonllm_duration_by_stage.items()
         })
         fit_tokens = self._winsorised(self._tokens_by_stage)
@@ -566,7 +670,7 @@ class CostMonitorHook:
         if hit is not None:
             return hit
         units = {
-            stage: max(1, round(attempts_target * len(series) / max(self._attempts, 1)))
+            stage: self._project_units(stage, len(series), attempts_target)
             for stage, series in self._tokens_by_stage.items()
         }
         est = estimate_by_stage(
@@ -809,6 +913,9 @@ class CostMonitorHook:
                   "growth_rate_mult": _lever("growth_rate_mult"),
                   "concurrency_mult": _lever("concurrency_mult")}
 
+        # The agent names a cause, not an action; keep `actions` for the
+        # console's existing widgets and put the diagnosis alongside it.
+        cause = str(adjustments.get("cause", "") or "")
         actions = []
         if any(v > 0 for v in levers.values()):
             actions.append("adjust_model")
@@ -828,6 +935,7 @@ class CostMonitorHook:
                 "attempt": self._attempts,
                 "mutant": self._counter,
                 "trigger": trigger,
+                "cause": cause,
                 "actions": actions,
                 "levers": levers,
                 # what each lever was before this wakeup, so a reader can say
