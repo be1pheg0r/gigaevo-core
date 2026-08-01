@@ -885,6 +885,7 @@ function renderAnalyze() {
 
   box.append(headline(paired, tasks));
   box.append(checkpointTable(paired));
+  box.append(agentReliabilityCurve(paired));
   box.append(harnessBlock(d.runs));
   box.append(observerBlock(d.runs));
   box.append(stabilityBlock(done));
@@ -1150,6 +1151,95 @@ function checkpointTable(paired) {
   tb.append(tr);
   t.append(tb);
   block.append(t);
+  return block;
+}
+
+/** Empirical CDF of |error| for estimator + agent at the decision-making
+ * checkpoints.  A median is only the x coordinate where this curve crosses
+ * 50%; the rest of the curve makes the tails and threshold hit-rate visible. */
+function agentReliabilityCurve(paired) {
+  const block = el("div", "block");
+  const head = el("div", "block__head");
+  head.append(el("h3", null, "Надёжность автомата + агента"));
+  head.append(el("p", null,
+    "Доля парных задач, у которых модуль ошибки не превышает порог по оси X. "
+    + "Медиана — место пересечения с 50%; форма кривой показывает хвосты, которые одна медиана скрывает."));
+  block.append(head);
+
+  const checkpoints = [10, 25, 50];
+  const palette = ["var(--agent)", "var(--wake)", "var(--auto)"];
+  const series = checkpoints.map((p, i) => ({
+    p,
+    color: palette[i],
+    values: paired.map(([, c]) => errAt(c.withagent, p, S.metric))
+      .filter((v) => v != null).map(Math.abs).sort((a, b) => a - b),
+  })).filter((s) => s.values.length);
+
+  if (!series.length) {
+    block.append(el("p", "empty", "Для кривой надёжности пока недостаточно завершённых пар."));
+    return block;
+  }
+
+  // A single extreme cold-start forecast must not flatten the useful part of
+  // the CDF. The clipped tail is still reported in the point tooltip.
+  const pooled = series.flatMap((s) => s.values);
+  const xMax = Math.max(25, Math.min(200, Math.ceil(quantile(pooled, 0.95) / 10) * 10));
+  const xTicks = [0, .25, .5, .75, 1].map((q) => Math.round(xMax * q));
+  const w = 980, h = 350, f = chartFrame(w, h, { l: 62, r: 150, t: 30, b: 42 });
+  yAxis(f, 0, 100, [0, 25, 50, 75, 100], "задач в пределах порога, %");
+  xAxis(f, 0, xMax, xTicks, "%");
+  const X = (v) => f.x(Math.min(v, xMax), 0, xMax);
+  const Y = (v) => f.y(v, 0, 100);
+
+  for (const threshold of [10, 25]) {
+    if (threshold > xMax) continue;
+    f.svg.appendChild(svgEl("line", {
+      x1: X(threshold), x2: X(threshold), y1: f.pad.t, y2: h - f.pad.b,
+      stroke: "var(--good)", "stroke-width": 1.25, "stroke-dasharray": "4 4", opacity: 0.65,
+    }));
+  }
+  f.svg.appendChild(svgEl("line", {
+    x1: f.pad.l, x2: w - f.pad.r, y1: Y(50), y2: Y(50),
+    stroke: "var(--ink)", "stroke-width": 1, "stroke-dasharray": "3 5", opacity: 0.35,
+  }));
+
+  series.forEach((s) => {
+    const n = s.values.length;
+    const pts = [[0, 0], ...s.values.map((v, i) => [v, ((i + 1) / n) * 100])];
+    const path = svgEl("path", {
+      class: "line", stroke: s.color,
+      d: linePath(pts.map(([x, y]) => [X(x), Y(y)])),
+    });
+    f.svg.appendChild(path);
+
+    const med = median(s.values);
+    const dot = svgEl("circle", {
+      cx: X(med), cy: Y(50), r: 5, fill: s.color,
+      stroke: "var(--surface)", "stroke-width": 2,
+    });
+    bindTip(dot, `<b>${s.p}% прогона</b><br>медиана |ошибки| <em>${pct(med)}</em><br>`
+      + `в пределах 10%: ${(s.values.filter((v) => v <= 10).length / n * 100).toFixed(0)}%<br>`
+      + `в пределах 25%: ${(s.values.filter((v) => v <= 25).length / n * 100).toFixed(0)}%<br>`
+      + `задач ${n}${s.values[n - 1] > xMax ? `<br>максимум ${pct(s.values[n - 1])}, хвост обрезан по X` : ""}`);
+    f.svg.appendChild(dot);
+
+    const lastY = Y(100) + 4 + series.indexOf(s) * 15;
+    const label = svgEl("text", { class: "dlabel", fill: s.color, x: w - f.pad.r + 10, y: lastY });
+    label.textContent = `${s.p}% прогона`;
+    f.svg.appendChild(label);
+  });
+
+  const legend = el("div", "legend");
+  series.forEach((s) => {
+    const item = el("span");
+    item.innerHTML = `<i class="swatch" style="background:${s.color}"></i>${s.p}% прогона · n=${s.values.length}`;
+    legend.append(item);
+  });
+  legend.append(el("span", null, "пунктир по X — пороги 10% и 25%; точки — медианы"));
+  block.append(legend);
+  const wrap = el("div", "chartwrap");
+  wrap.append(f.svg);
+  block.append(wrap);
   return block;
 }
 
