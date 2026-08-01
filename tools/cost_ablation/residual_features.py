@@ -173,6 +173,26 @@ def main() -> None:
             print(f"{'разброс внутри задачи':>28} x{within:.2f}   "
                   f"между задачами x{across:.2f}   (задач с повторами: {len(rep)})")
 
+        # Does knowing WHICH task this is beat knowing nothing? Leave-one-out,
+        # because a per-task median that includes the point it is scoring
+        # would flatter itself. This is the direct test of "show the agent the
+        # task": if the task prior does not beat the global one, the task is
+        # not the thing to show.
+        glob_err, task_err, n_task = [], [], 0
+        for i, m in enumerate(ms):
+            others = [x for j, x in enumerate(ms) if j != i]
+            same = [x for j, x in enumerate(ms) if j != i and fams[p][j] == fams[p][i]]
+            glob_err.append(abs(1 - m / st.median(others)) * 100)
+            if len(same) >= 2:
+                task_err.append(abs(1 - m / st.median(same)) * 100)
+                n_task += 1
+        if n_task >= 6:
+            # compare on the same subset, else the two are not comparable
+            paired_glob = [g for g, f_ in zip(glob_err, fams[p])
+                           if sum(1 for x in fams[p] if x == f_) >= 3]
+            print(f"{'приор: общий':>28} {st.median(paired_glob):5.1f}%   "
+                  f"{'приор: по задаче':>20} {st.median(task_err):5.1f}%   (n={n_task})")
+
 
 if __name__ == "__main__":
     main()
