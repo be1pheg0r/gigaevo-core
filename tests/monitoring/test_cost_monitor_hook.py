@@ -797,3 +797,47 @@ class TestDisagreementDoesNotFeedOnItself:
         near = hook._progress_disagreement(1000.0, 300.0)
         far = hook._progress_disagreement(1000.0, 800.0)   # clock much further on
         assert far > near
+
+
+class TestTailCalibration:
+    """TAIL_CALIBRATION: the measured shortfall of the remaining term.
+
+    The table is the median of (actual-elapsed)/(predicted-elapsed) over 37
+    recorded runs. It removes the estimator's systematic undershoot; what it
+    cannot remove is run-to-run spread, which is measured LARGER within a
+    repeated task than between tasks.
+    """
+
+    def _hook(self, attempts: int, cap: int = 100) -> CostMonitorHook:
+        pred = CostPrediction(max_mutants=cap, max_in_flight=1)
+        hook = CostMonitorHook(agent=None, prediction=pred, interval=1000)
+        hook._attempts = attempts
+        return hook
+
+    def test_it_lifts_the_estimate_early_and_stops_by_half_way(self) -> None:
+        early = self._hook(10)._tail_calibration()
+        quarter = self._hook(25)._tail_calibration()
+        half = self._hook(50)._tail_calibration()
+        assert early == pytest.approx(1.90, abs=0.01)
+        assert quarter == pytest.approx(1.22, abs=0.01)
+        assert half == pytest.approx(1.03, abs=0.01)
+        assert early > quarter > half
+
+    def test_it_interpolates_between_measured_points(self) -> None:
+        # 30% sits between the 25% and 35% rows
+        mid = self._hook(30)._tail_calibration()
+        assert 1.07 < mid < 1.22
+
+    def test_it_never_scales_below_one(self) -> None:
+        """Correcting an undershoot must not turn into an overshoot."""
+        for attempts in (0, 1, 5, 25, 50, 99, 100, 500):
+            assert self._hook(attempts)._tail_calibration() >= 1.0
+
+    def test_it_is_flat_outside_the_measured_range(self) -> None:
+        assert self._hook(0)._tail_calibration() == self._hook(2)._tail_calibration()
+        assert self._hook(100)._tail_calibration() == pytest.approx(1.0)
+
+    def test_progress_is_measured_against_the_cap_not_the_count(self) -> None:
+        """Same fraction of two differently sized runs -> same correction."""
+        assert (self._hook(10, cap=100)._tail_calibration()
+                == pytest.approx(self._hook(7, cap=70)._tail_calibration(), abs=0.02))

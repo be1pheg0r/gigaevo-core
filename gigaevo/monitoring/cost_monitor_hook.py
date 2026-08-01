@@ -75,6 +75,32 @@ NON_LLM_DURATION_STAGES = frozenset({
 # older log strips them too.
 OBSERVER_STAGES = frozenset({"CostMonitorAgent", "NoOpCostMonitorAgent"})
 
+# How much the remaining term has to be scaled by, as a function of how far
+# the run has got. Measured, not chosen: for 37 recorded agentless runs
+# (tools/cost_ablation/calibrate_tail.py, 2026-08-01) this is the median of
+#
+#     (actual_duration - elapsed) / (predicted_duration - elapsed)
+#
+# at each checkpoint — the multiplier that would have made the forecast exact.
+# The estimator is short early because a growth law fitted on a handful of
+# buckets cannot see how much is still coming; the gap closes as evidence
+# accumulates and is gone by half way.
+#
+# Split-half validation: a constant fitted on one half of the logs scores no
+# worse on the other half than on its own, so this is a property of the
+# estimator and not of these particular runs.
+#
+# A table of measured points rather than a fitted curve, deliberately: it has
+# no parameters to overfit and re-deriving it from more logs is one command.
+#
+# ponytail: this removes the MEDIAN error only. What is left after it (36% at
+# 10%, 26% at 25%) is run-to-run spread — measured larger WITHIN a repeated
+# task than between tasks — and no per-progress constant can reach it.
+TAIL_CALIBRATION = (
+    (0.05, 1.83), (0.10, 1.90), (0.15, 1.60), (0.20, 1.43),
+    (0.25, 1.22), (0.35, 1.07), (0.50, 1.03), (1.00, 1.00),
+)
+
 
 class CostMonitorHook:
     """Runs CostMonitorAgent every N mutants, feeds results into CostPrediction."""
@@ -470,6 +496,24 @@ class CostMonitorHook:
             return None
         return dur_done - tok_done
 
+    def _tail_calibration(self) -> float:
+        """Interpolate TAIL_CALIBRATION at the run's current progress.
+
+        Progress is attempts against the cap, which is the same axis the table
+        was measured on. Flat outside the table: before the first point the
+        earliest correction applies, after the last one there is nothing left
+        to correct.
+        """
+        cap = max(self._pred.max_mutants, 1)
+        p = min(max(self._attempts / cap, 0.0), 1.0)
+        pts = TAIL_CALIBRATION
+        if p <= pts[0][0]:
+            return pts[0][1]
+        for (p0, m0), (p1, m1) in zip(pts, pts[1:]):
+            if p <= p1:
+                return m0 + (m1 - m0) * (p - p0) / (p1 - p0)
+        return pts[-1][1]
+
     def _project_units(self, stage: str, seen: int, horizon: int) -> int:
         """How many times this stage will have fired by attempt ``horizon``.
 
@@ -588,7 +632,10 @@ class CostMonitorHook:
             nonllm_duration_by_stage=self._nonllm_duration_by_stage,
             elapsed_s=elapsed_s,
             concurrency=self._concurrency,
-            tail_mult=tail_mult,
+            # The model's own calibration multiplies with the agent's lever:
+            # the table is what the estimator is known to be short by, the
+            # lever is the agent's correction on top of an unbiased baseline.
+            tail_mult=tail_mult * self._tail_calibration(),
             fit_tokens_out_by_stage=fit_tokens_out,
             fit_latency_by_stage=fit_latency,
             fit_nonllm_by_stage=fit_nonllm,
