@@ -536,6 +536,8 @@ def achieved_concurrency(
     window_frac: float = 0.5,
     min_window_s: float = 300.0,
     shrink_k: int = 80,
+    min_concurrency: float = 0.5,
+    max_concurrency: float = 64.0,
 ) -> float:
     """Estimate achieved concurrency as service time per trailing wall time.
 
@@ -554,7 +556,7 @@ def achieved_concurrency(
     n = len(calls)
     w = n / (n + shrink_k)
     blended = w * (service_s / span_s) + (1 - w) * max_in_flight
-    return min(max(blended, 0.5), 64.0)
+    return min(max(blended, min_concurrency), max_concurrency)
 
 
 def estimate_duration_by_stage(
@@ -573,6 +575,7 @@ def estimate_duration_by_stage(
     fit_latency_by_stage: dict[str, list[float]] | None = None,
     fit_nonllm_by_stage: dict[str, list[float]] | None = None,
     ci_method: str | None = None,
+    ci_alpha: float = 0.1,
     width_scale: float = 1.0,
 ) -> tuple[float, tuple[float, float]]:
     """Predict anchored wall-clock duration with per-stage TTFT/TPOT models.
@@ -605,7 +608,7 @@ def estimate_duration_by_stage(
         remaining_ms += stage_remaining_ms
         if ci_method:
             weighted_w_num += (
-                relative_tail_width(ci_method, token_law_cls, fit_out, n)
+                relative_tail_width(ci_method, token_law_cls, fit_out, n, ci_alpha)
                 * stage_remaining_ms
             )
 
@@ -619,7 +622,7 @@ def estimate_duration_by_stage(
         n_points += len(durations)
         if ci_method:
             weighted_w_num += (
-                relative_tail_width(ci_method, nonllm_law_cls, fit_dur, n)
+                relative_tail_width(ci_method, nonllm_law_cls, fit_dur, n, ci_alpha)
                 * stage_remaining_ms
             )
 

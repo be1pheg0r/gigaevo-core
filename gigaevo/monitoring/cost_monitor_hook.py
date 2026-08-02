@@ -97,6 +97,36 @@ class CostMonitorHook:
         aci_alpha: float = 0.10,
         aci_gamma: float = 0.05,
         disagreement_gap: float = 0.15,
+        max_relative_step: float = 0.30,
+        reversal_step_factor: float = 0.50,
+        lever_deadband: float = LEVER_DEADBAND,
+        reversal_window: int = REVERSAL_WINDOW,
+        min_sustained_calls: int = MIN_SUSTAINED_CALLS,
+        non_llm_duration_stages: list[str] | tuple[str, ...] = tuple(
+            NON_LLM_DURATION_STAGES
+        ),
+        observer_stages: list[str] | tuple[str, ...] = tuple(OBSERVER_STAGES),
+        tail_calibration: list[list[float]] | tuple[tuple[float, float], ...] = (
+            TAIL_CALIBRATION
+        ),
+        concurrency_window_frac: float = 0.50,
+        concurrency_min_window_s: float = 300.0,
+        concurrency_shrink_k: int = 80,
+        min_effective_concurrency: float = 0.50,
+        max_effective_concurrency: float = 64.0,
+        program_size_min_samples: int = 8,
+        program_size_window_divisor: int = 4,
+        projection_recent_min_samples: int = 4,
+        aci_scale_min: float = 0.50,
+        aci_scale_max: float = 5.0,
+        golden_ratio_min: float = 0.50,
+        golden_ratio_max: float = 2.0,
+        growth_rate_min: float = 0.30,
+        growth_rate_max: float = 3.0,
+        concurrency_mult_min: float = 0.30,
+        concurrency_mult_max: float = 3.0,
+        recent_calls_limit: int = 20,
+        fallback_backpressure_util: float = 0.80,
     ):
         self._agent = agent
         self._pred = prediction
@@ -136,6 +166,37 @@ class CostMonitorHook:
         self._disagreement_gap = disagreement_gap
         self._warmup_attempts = warmup_attempts
         self._min_leverage = min_leverage
+        self._max_relative_step = max_relative_step
+        self._reversal_step_factor = reversal_step_factor
+        self._lever_deadband = lever_deadband
+        self._reversal_window = reversal_window
+        self._min_sustained_calls = min_sustained_calls
+        self._non_llm_duration_stages = frozenset(non_llm_duration_stages)
+        self._observer_stages = frozenset(observer_stages)
+        self._tail_calibration_points = tuple(
+            (float(progress), float(multiplier))
+            for progress, multiplier in tail_calibration
+        )
+        if not self._tail_calibration_points:
+            raise ValueError("tail_calibration must contain at least one point")
+        self._concurrency_window_frac = concurrency_window_frac
+        self._concurrency_min_window_s = concurrency_min_window_s
+        self._concurrency_shrink_k = concurrency_shrink_k
+        self._min_effective_concurrency = min_effective_concurrency
+        self._max_effective_concurrency = max_effective_concurrency
+        self._program_size_min_samples = program_size_min_samples
+        self._program_size_window_divisor = program_size_window_divisor
+        self._projection_recent_min_samples = projection_recent_min_samples
+        self._aci_scale_min = aci_scale_min
+        self._aci_scale_max = aci_scale_max
+        self._golden_ratio_min = golden_ratio_min
+        self._golden_ratio_max = golden_ratio_max
+        self._growth_rate_min = growth_rate_min
+        self._growth_rate_max = growth_rate_max
+        self._concurrency_mult_min = concurrency_mult_min
+        self._concurrency_mult_max = concurrency_mult_max
+        self._recent_calls_limit = recent_calls_limit
+        self._fallback_backpressure_util = fallback_backpressure_util
         # Online interval calibration (see _update_aci). alpha is the target
         # miscoverage rate, i.e. also the target agent wakeup rate; gamma is
         # the step. gamma=0 disables it and restores the model-only width.
@@ -179,7 +240,7 @@ class CostMonitorHook:
         of watching, not the cost of the run, and letting them in made the
         observer the biggest outlier in its own telemetry.
         """
-        if event.stage in OBSERVER_STAGES:
+        if event.stage in self._observer_stages:
             self._observer_calls += 1
             self._observer_latency_ms += event.latency_ms
             return
@@ -227,7 +288,7 @@ class CostMonitorHook:
     def _on_stage_exec(self, event: StageExec) -> None:
         # A cache "hit" returns near-instantly and isn't representative of
         # future cost for that stage — only count real executions.
-        if event.stage in NON_LLM_DURATION_STAGES and event.decision != "hit":
+        if event.stage in self._non_llm_duration_stages and event.decision != "hit":
             self._stage_exec_history.append((event.stage, event.duration_ms))
 
     def _winsorised(self, by_stage: dict[str, list[float]]) -> dict[str, list[float]]:
@@ -270,9 +331,9 @@ class CostMonitorHook:
         err = 1.0 if miscovered else 0.0
         self._aci_scale = float(
             min(
-                5.0,
+                self._aci_scale_max,
                 max(
-                    0.5,
+                    self._aci_scale_min,
                     self._aci_scale
                     * math.exp(self._aci_gamma * (err - self._aci_alpha)),
                 ),
@@ -290,9 +351,9 @@ class CostMonitorHook:
             return
         self._aci_scale = float(
             min(
-                5.0,
+                self._aci_scale_max,
                 max(
-                    0.5,
+                    self._aci_scale_min,
                     self._aci_scale
                     * math.exp(self._aci_gamma * n * (1.0 - self._aci_alpha)),
                 ),
@@ -362,11 +423,23 @@ class CostMonitorHook:
         # with the concurrency multiplier, so multiplying the remaining term
         # by conc/tail recovers what the model would have said untouched.
         conc = self._pred.llm_concurrency_override
-        conc = conc if 0.3 <= conc <= 3.0 else 1.0
+        conc = (
+            conc
+            if self._concurrency_mult_min <= conc <= self._concurrency_mult_max
+            else 1.0
+        )
         tail = 1.0
-        if 0.5 <= self._pred.llm_golden_override <= 2.0:
+        if (
+            self._golden_ratio_min
+            <= self._pred.llm_golden_override
+            <= self._golden_ratio_max
+        ):
             tail *= self._pred.llm_golden_override
-        if 0.3 <= self._pred.llm_growth_override <= 3.0:
+        if (
+            self._growth_rate_min
+            <= self._pred.llm_growth_override
+            <= self._growth_rate_max
+        ):
             tail *= self._pred.llm_growth_override
         raw_duration = elapsed_s + max(duration_s - elapsed_s, 0.0) * conc / max(
             tail, 1e-6
@@ -387,16 +460,16 @@ class CostMonitorHook:
             for r in self._call_history
             if r.stage == "MutationAgent" and r.tokens_in
         ]
-        if len(ins) < 8:
+        if len(ins) < self._program_size_min_samples:
             return 0, 0
-        k = max(len(ins) // 4, 2)
+        k = max(len(ins) // self._program_size_window_divisor, 2)
         return int(statistics.median(ins[:k])), int(statistics.median(ins[-k:]))
 
     def _tail_calibration(self) -> float:
         """Interpolate ``TAIL_CALIBRATION`` at the current attempt progress."""
         cap = max(self._pred.max_mutants, 1)
         p = min(max(self._attempts / cap, 0.0), 1.0)
-        pts = TAIL_CALIBRATION
+        pts = self._tail_calibration_points
         if p <= pts[0][0]:
             return pts[0][1]
         for (p0, m0), (p1, m1) in zip(pts, pts[1:]):
@@ -408,7 +481,10 @@ class CostMonitorHook:
         """Project stage firings to ``horizon`` from the recent attempt rate."""
         hist = self._bucket_attempts.get(stage) or []
         rate = seen / max(self._attempts, 1)
-        if len(hist) >= 4 and self._attempts >= 4:
+        if (
+            len(hist) >= self._projection_recent_min_samples
+            and self._attempts >= self._projection_recent_min_samples
+        ):
             lo = self._attempts // 2
             span = max(self._attempts - lo, 1)
             rate = max(rate, sum(1 for a in hist if a > lo) / span)
@@ -491,19 +567,37 @@ class CostMonitorHook:
         )
         # Agent overrides scale only the unobserved tail.
         tail_mult = 1.0
-        if 0.5 <= self._pred.llm_golden_override <= 2.0:
+        if (
+            self._golden_ratio_min
+            <= self._pred.llm_golden_override
+            <= self._golden_ratio_max
+        ):
             tail_mult *= self._pred.llm_golden_override
-        if 0.3 <= self._pred.llm_growth_override <= 3.0:
+        if (
+            self._growth_rate_min
+            <= self._pred.llm_growth_override
+            <= self._growth_rate_max
+        ):
             tail_mult *= self._pred.llm_growth_override
         elapsed_s = self._clock() - self._t0
         self._concurrency = achieved_concurrency(
             self._call_times,
             now_s=elapsed_s,
             max_in_flight=self._pred.max_in_flight,
+            window_frac=self._concurrency_window_frac,
+            min_window_s=self._concurrency_min_window_s,
+            shrink_k=self._concurrency_shrink_k,
+            min_concurrency=self._min_effective_concurrency,
+            max_concurrency=self._max_effective_concurrency,
         )
-        if 0.3 <= self._pred.llm_concurrency_override <= 3.0:
+        if (
+            self._concurrency_mult_min
+            <= self._pred.llm_concurrency_override
+            <= self._concurrency_mult_max
+        ):
             self._concurrency = max(
-                0.5, self._concurrency * self._pred.llm_concurrency_override
+                self._min_effective_concurrency,
+                self._concurrency * self._pred.llm_concurrency_override,
             )
         # Duration uses the TTFT+TPOT physical model (latency ~ tokens_out),
         # not a growth law over call index — latency doesn't follow a growth
@@ -524,6 +618,7 @@ class CostMonitorHook:
             fit_latency_by_stage=fit_latency,
             fit_nonllm_by_stage=fit_nonllm,
             ci_method=self._ci_method,
+            ci_alpha=self._aci_alpha,
             width_scale=self._aci_scale,
         )
         # Predict with the current width, observe, then update it — the online
@@ -674,18 +769,18 @@ class CostMonitorHook:
             n = int(sustained_over_calls)
         except (TypeError, ValueError):
             n = 0
-        if n >= MIN_SUSTAINED_CALLS:
+        if n >= self._min_sustained_calls:
             return True
         logger.info(
             "[CostMonitorHook] blunt lever refused: sustained_over_calls={} < {}",
             n,
-            MIN_SUSTAINED_CALLS,
+            self._min_sustained_calls,
         )
         return False
 
     def _gate_lever(self, name: str, current: float, proposed: float) -> float | None:
         """Apply deadband and reversal damping to a proposed lever value."""
-        if current > 0 and abs(proposed - current) / current < LEVER_DEADBAND:
+        if current > 0 and abs(proposed - current) / current < self._lever_deadband:
             logger.info(
                 "[CostMonitorHook] {} move ignored: {:.3f}->{:.3f} inside deadband",
                 name,
@@ -698,9 +793,11 @@ class CostMonitorHook:
         reversing = (
             prev_dir != 0
             and direction != prev_dir
-            and (self._agent_calls - prev_at) <= REVERSAL_WINDOW
+            and (self._agent_calls - prev_at) <= self._reversal_window
         )
-        step = 0.3 / 2 if reversing else 0.3
+        step = self._max_relative_step
+        if reversing:
+            step *= self._reversal_step_factor
         value = _clamp_step(current, proposed, step)
         self._lever_dir[name] = (direction, self._agent_calls)
         if reversing:
@@ -740,10 +837,11 @@ class CostMonitorHook:
                 self._last_bp.max_in_flight,
             )
         else:
-            bp_util, bp_in_flight, bp_max_in_flight = 0.8, 0, 8
+            bp_util = self._fallback_backpressure_util
+            bp_in_flight, bp_max_in_flight = 0, self._pred.max_in_flight
         base_len, cur_len = self._program_size_proxy()
         tools = _ToolSet(
-            recent_calls=self._call_history[-20:],
+            recent_calls=self._call_history[-self._recent_calls_limit :],
             backpressure_util=bp_util,
             in_flight=bp_in_flight,
             max_in_flight=bp_max_in_flight,

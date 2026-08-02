@@ -14,7 +14,7 @@ engine_config:
   program_acceptor: ${program_acceptor}
   parent_selector: ${parent_selector}
   stopper: ${stopper}
-  max_in_flight: 8
+  max_in_flight: ${max_in_flight}
 
 # Override engine target
 evolution_engine:

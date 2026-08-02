@@ -20,28 +20,67 @@ def _robust_rate(values: list[float]) -> float:
     return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2
 
 
-def _prediction_interval(values: list[float]) -> tuple[float, float]:
+def _prediction_interval(
+    values: list[float],
+    *,
+    sparse_low_mult: float = 0.85,
+    sparse_high_mult: float = 1.15,
+) -> tuple[float, float]:
     if len(values) < 3:
         m = _robust_rate(values)
-        return m * 0.85, m * 1.15
+        return m * sparse_low_mult, m * sparse_high_mult
     s = sorted(values)
     lo = s[max(0, len(s) // 10)]
     hi = s[min(len(s) - 1, 9 * len(s) // 10)]
     return lo, hi
 
 
-def _ramped_golden(steps: int) -> float:
-    return (
-        1.0
-        + (GOLDEN_RATIO_MAX - 1.0)
-        * min(steps, GOLDEN_RATIO_RAMP_STEPS)
-        / GOLDEN_RATIO_RAMP_STEPS
-    )
+def _ramped_golden(steps: int, *, golden_ratio_max: float, ramp_steps: int) -> float:
+    return 1.0 + (golden_ratio_max - 1.0) * min(steps, ramp_steps) / ramp_steps
 
 
 # --------------------------------------------------------------------------- #
 # Data classes
 # --------------------------------------------------------------------------- #
+
+
+@dataclass
+class CostPredictorSettings:
+    """Hydra-configurable parameters of the legacy baseline/calibration layers."""
+
+    cold_start_factor: float = COLD_START_FACTOR
+    warmup_calls: int = WARMUP_CALLS
+    calibration_window: int = CALIBRATION_WINDOW
+    golden_ratio_max: float = GOLDEN_RATIO_MAX
+    golden_ratio_ramp_steps: int = GOLDEN_RATIO_RAMP_STEPS
+    sparse_interval_low_mult: float = 0.85
+    sparse_interval_high_mult: float = 1.15
+    calls_per_mutation: float = 94.0 / 50.0
+    average_total_duration_s: float = 1397.5
+    baseline_call_count: int = 94
+    complexity_weight: float = 0.02
+    depth_weight: float = 0.05
+    growth_fast_mult: float = 1.4
+    growth_medium_mult: float = 1.1
+    growth_slow_mult: float = 0.9
+    bottleneck_mult: float = 1.3
+    chain_mult: float = 1.5
+    base_tokens_per_call: int = 5000
+    initial_duration_ci_low_mult: float = 0.6
+    initial_duration_ci_high_mult: float = 1.5
+    initial_token_ci_low_mult: float = 0.7
+    initial_token_ci_high_mult: float = 1.3
+    default_backpressure_utilization: float = 0.8
+    low_backpressure_threshold: float = 0.5
+    medium_backpressure_threshold: float = 0.8
+    low_backpressure_mult: float = 1.5
+    medium_backpressure_mult: float = 1.1
+    calibrated_ci_low_mult: float = 0.7
+    calibrated_ci_high_mult: float = 1.3
+    smoothing_ci_low_mult: float = 0.8
+    smoothing_ci_high_mult: float = 1.2
+    smoothing_min_wall_s: float = 0.1
+    smoothing_min_throughput: float = 0.001
 
 
 @dataclass
@@ -208,6 +247,7 @@ class CostPrediction:
     bottleneck_hint: str = ""
     max_mutants: int = 50
     max_in_flight: int = 8
+    settings: CostPredictorSettings = field(default_factory=CostPredictorSettings)
 
     # LLM agent overrides (set by CostMonitorAgent)
     llm_cold_override: float = -1.0
@@ -269,16 +309,23 @@ def compute_static_baseline(
     max_in_flight: int,
     llm_growth_rate: str = "fast",
     bottleneck_hint: str = "",
+    settings: CostPredictorSettings | None = None,
 ) -> CostPrediction:
-    calls_per_mutation = 94.0 / 50.0
-    avg_total_duration = 1397.5
-    avg_duration_per_call = avg_total_duration / 94
+    settings = settings or CostPredictorSettings()
+    calls_per_mutation = settings.calls_per_mutation
+    avg_duration_per_call = (
+        settings.average_total_duration_s / settings.baseline_call_count
+    )
 
-    complexity_factor = 1.0 + complexity_score * 0.02
-    depth_factor = 1.0 + (dag.seq_depth - 1) * 0.05
-    growth_adj = {"fast": 1.4, "medium": 1.1, "slow": 0.9}.get(llm_growth_rate, 1.1)
-    bottleneck_adj = 1.3 if dag.has_bottleneck else 1.0
-    chain_adj = 1.5 if dag.is_chain_task else 1.0
+    complexity_factor = 1.0 + complexity_score * settings.complexity_weight
+    depth_factor = 1.0 + (dag.seq_depth - 1) * settings.depth_weight
+    growth_adj = {
+        "fast": settings.growth_fast_mult,
+        "medium": settings.growth_medium_mult,
+        "slow": settings.growth_slow_mult,
+    }.get(llm_growth_rate, settings.growth_medium_mult)
+    bottleneck_adj = settings.bottleneck_mult if dag.has_bottleneck else 1.0
+    chain_adj = settings.chain_mult if dag.is_chain_task else 1.0
 
     per_mutation = (
         avg_duration_per_call
@@ -287,8 +334,8 @@ def compute_static_baseline(
     )
     predicted = max_mutants * per_mutation / max(1, max_in_flight)
 
-    base_tokens_per_call = 5000
-    cold_start_tokens = int(base_tokens_per_call * COLD_START_FACTOR)
+    base_tokens_per_call = settings.base_tokens_per_call
+    cold_start_tokens = int(base_tokens_per_call * settings.cold_start_factor)
 
     return CostPrediction(
         dag_topology=dag,
@@ -299,16 +346,18 @@ def compute_static_baseline(
         bottleneck_hint=bottleneck_hint,
         max_mutants=max_mutants,
         max_in_flight=max_in_flight,
+        settings=settings,
         predicted_duration_s=predicted,
         predicted_llm_calls=int(max_mutants * calls_per_mutation),
         predicted_total_tokens=int(
-            WARMUP_CALLS * cold_start_tokens
-            + (max_mutants * calls_per_mutation - WARMUP_CALLS) * base_tokens_per_call
+            settings.warmup_calls * cold_start_tokens
+            + (max_mutants * calls_per_mutation - settings.warmup_calls)
+            * base_tokens_per_call
         ),
-        ci_low_s=predicted * 0.6,
-        ci_high_s=predicted * 1.5,
-        token_ci_low=int(predicted * 0.7),
-        token_ci_high=int(predicted * 1.3),
+        ci_low_s=predicted * settings.initial_duration_ci_low_mult,
+        ci_high_s=predicted * settings.initial_duration_ci_high_mult,
+        token_ci_low=int(predicted * settings.initial_token_ci_low_mult),
+        token_ci_high=int(predicted * settings.initial_token_ci_high_mult),
     )
 
 
@@ -337,8 +386,9 @@ def calibrate_prediction(
         return pred
 
     # ── Warmup phase ──
-    if done_mutants <= WARMUP_CALLS and not pred.warmup_completed:
-        alpha = done_mutants / WARMUP_CALLS
+    settings = pred.settings
+    if done_mutants <= settings.warmup_calls and not pred.warmup_completed:
+        alpha = done_mutants / settings.warmup_calls
         real_rate = wall_time_s / done_mutants
         cold_est = pred.predicted_duration_s / max(pred.max_mutants, 1)
         blended_rate = cold_est * (1 - alpha) + real_rate * alpha
@@ -353,24 +403,32 @@ def calibrate_prediction(
         pred.wall_time_at_calibration = wall_time_s
         pred.calibration_mutants_done = done_mutants
         pred.steps_since_calibration = 0
-        if done_mutants == WARMUP_CALLS:
+        if done_mutants == settings.warmup_calls:
             pred.warmup_completed = True
         return pred
 
     # ── Robust calibration ──
-    is_calib_point = done_mutants % CALIBRATION_WINDOW == 0
+    is_calib_point = done_mutants % settings.calibration_window == 0
 
     if is_calib_point or not pred.warmup_completed:
         real_throughput = wall_time_s / max(done_mutants, 1)
-        util = bp_snapshot.utilization if bp_snapshot else 0.8
-        if util < 0.5:
-            bp_adj = 1.5
-        elif util < 0.8:
-            bp_adj = 1.1
+        util = (
+            bp_snapshot.utilization
+            if bp_snapshot
+            else settings.default_backpressure_utilization
+        )
+        if util < settings.low_backpressure_threshold:
+            bp_adj = settings.low_backpressure_mult
+        elif util < settings.medium_backpressure_threshold:
+            bp_adj = settings.medium_backpressure_mult
         else:
             bp_adj = 1.0
 
-        golden = _ramped_golden(pred.steps_since_calibration)
+        golden = _ramped_golden(
+            pred.steps_since_calibration,
+            golden_ratio_max=settings.golden_ratio_max,
+            ramp_steps=settings.golden_ratio_ramp_steps,
+        )
 
         # Apply LLM agent overrides
         if 0.5 <= pred.llm_golden_override <= 2.0:
@@ -386,7 +444,9 @@ def calibrate_prediction(
         if llm_summary.tokens_per_call and len(llm_summary.tokens_per_call) >= 3:
             rate = _robust_rate([float(t) for t in llm_summary.tokens_per_call])
             lo, hi = _prediction_interval(
-                [float(t) for t in llm_summary.tokens_per_call]
+                [float(t) for t in llm_summary.tokens_per_call],
+                sparse_low_mult=settings.sparse_interval_low_mult,
+                sparse_high_mult=settings.sparse_interval_high_mult,
             )
             pred.predicted_total_tokens = int(rate * pred.predicted_llm_calls)
             pred.token_ci_low = int(lo * pred.predicted_llm_calls)
@@ -398,15 +458,19 @@ def calibrate_prediction(
             )
 
         pred.predicted_duration_s = new_duration
-        pred.ci_low_s = new_duration * 0.7
-        pred.ci_high_s = new_duration * 1.3
+        pred.ci_low_s = new_duration * settings.calibrated_ci_low_mult
+        pred.ci_high_s = new_duration * settings.calibrated_ci_high_mult
         pred.wall_time_at_calibration = wall_time_s
         pred.calibration_mutants_done = done_mutants
         pred.calibration_completed = True
         pred.steps_since_calibration = 0
     else:
         pred.steps_since_calibration += 1
-        golden = _ramped_golden(pred.steps_since_calibration)
+        golden = _ramped_golden(
+            pred.steps_since_calibration,
+            golden_ratio_max=settings.golden_ratio_max,
+            ramp_steps=settings.golden_ratio_ramp_steps,
+        )
         if 0.5 <= pred.llm_golden_override <= 2.0:
             golden = pred.llm_golden_override
         if pred.calibration_completed:
@@ -435,16 +499,25 @@ def exponential_smoothing_estimate(
     last = predictions[-1]
     if not last.is_ready:
         return None
-    current_throughput = current_mutants_done / max(current_wall_s, 0.1)
+    settings = last.settings
+    current_throughput = current_mutants_done / max(
+        current_wall_s, settings.smoothing_min_wall_s
+    )
     prev_throughput = last.calibration_mutants_done / max(
-        last.wall_time_at_calibration, 0.1
+        last.wall_time_at_calibration, settings.smoothing_min_wall_s
     )
     smoothed = alpha * current_throughput + (1 - alpha) * prev_throughput
     remaining = last.max_mutants - last.calibration_mutants_done
-    golden = _ramped_golden(min(remaining, GOLDEN_RATIO_RAMP_STEPS))
+    golden = _ramped_golden(
+        min(remaining, settings.golden_ratio_ramp_steps),
+        golden_ratio_max=settings.golden_ratio_max,
+        ramp_steps=settings.golden_ratio_ramp_steps,
+    )
     if 0.5 <= last.llm_golden_override <= 2.0:
         golden = last.llm_golden_override
-    additional_duration = remaining / max(smoothed, 0.001) * golden
+    additional_duration = (
+        remaining / max(smoothed, settings.smoothing_min_throughput) * golden
+    )
     result = CostPrediction(
         dag_topology=last.dag_topology,
         prompt_tokens=last.prompt_tokens,
@@ -454,11 +527,14 @@ def exponential_smoothing_estimate(
         bottleneck_hint=last.bottleneck_hint,
         max_mutants=last.max_mutants,
         max_in_flight=last.max_in_flight,
+        settings=settings,
         predicted_duration_s=last.wall_time_at_calibration + additional_duration,
         predicted_llm_calls=last.predicted_llm_calls,
         predicted_total_tokens=last.predicted_total_tokens,
-        ci_low_s=(last.wall_time_at_calibration + additional_duration) * 0.8,
-        ci_high_s=(last.wall_time_at_calibration + additional_duration) * 1.2,
+        ci_low_s=(last.wall_time_at_calibration + additional_duration)
+        * settings.smoothing_ci_low_mult,
+        ci_high_s=(last.wall_time_at_calibration + additional_duration)
+        * settings.smoothing_ci_high_mult,
         token_ci_low=last.token_ci_low,
         token_ci_high=last.token_ci_high,
         llm_cold_override=last.llm_cold_override,

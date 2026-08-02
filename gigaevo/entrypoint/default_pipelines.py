@@ -20,7 +20,6 @@ from gigaevo.programs.metrics.formatter import MetricsFormatter
 from gigaevo.programs.stages.ancestry_selector import AncestrySelector
 from gigaevo.programs.stages.archive_gate import ArchivePotentialGateStage
 from gigaevo.programs.stages.base import Stage
-from gigaevo.programs.stages.cost_assessment import CostAssessmentStage
 from gigaevo.programs.stages.collector import (
     AncestorProgramIds,
     DescendantProgramIds,
@@ -162,12 +161,18 @@ class DefaultPipelineBuilder(PipelineBuilder):
         max_insights: int = DEFAULT_MAX_INSIGHTS,
         max_code_length: int = MAX_CODE_LENGTH,
         archive_gate_enabled: bool = False,
+        optuna_max_parallel: int = OPTUNA_MAX_PARALLEL,
+        optimization_time_budget_fraction: float = (
+            DEFAULT_OPTIMIZATION_TIME_BUDGET_FRACTION
+        ),
     ):
         super().__init__(ctx, dag_timeout=dag_timeout, max_parallel=max_parallel)
         self._stage_timeout = stage_timeout
         self._max_insights = max_insights
         self._max_code_length = max_code_length
         self._archive_gate_enabled = archive_gate_enabled
+        self._optuna_max_parallel = optuna_max_parallel
+        self._optimization_time_budget_fraction = optimization_time_budget_fraction
         self._optimization_time_budget: float | None = None
         self._contribute_default_nodes()
         self._contribute_default_edges()
@@ -208,7 +213,7 @@ class DefaultPipelineBuilder(PipelineBuilder):
 
         extra = self._optuna_stage_kwargs()
 
-        max_par = extra.pop("max_parallel", self.OPTUNA_MAX_PARALLEL)
+        max_par = extra.pop("max_parallel", self._optuna_max_parallel)
         score_key = extra.pop(
             "score_key", self.OPTUNA_SCORE_KEY or metrics_ctx.get_primary_key()
         )
@@ -864,6 +869,10 @@ class OptunaOptPipelineBuilder(DefaultPipelineBuilder):
         max_code_length: int = MAX_CODE_LENGTH,
         optimization_time_budget: float | None = None,
         archive_gate_enabled: bool = False,
+        optuna_max_parallel: int = DefaultPipelineBuilder.OPTUNA_MAX_PARALLEL,
+        optimization_time_budget_fraction: float = (
+            DEFAULT_OPTIMIZATION_TIME_BUDGET_FRACTION
+        ),
     ):
         super().__init__(
             ctx,
@@ -873,11 +882,13 @@ class OptunaOptPipelineBuilder(DefaultPipelineBuilder):
             max_insights=max_insights,
             max_code_length=max_code_length,
             archive_gate_enabled=archive_gate_enabled,
+            optuna_max_parallel=optuna_max_parallel,
+            optimization_time_budget_fraction=optimization_time_budget_fraction,
         )
         self._optimization_time_budget = (
             optimization_time_budget
             if optimization_time_budget is not None
-            else dag_timeout * DEFAULT_OPTIMIZATION_TIME_BUDGET_FRACTION
+            else dag_timeout * self._optimization_time_budget_fraction
         )
         if ctx.problem_ctx.is_contextual:
             self._add_context_stage_and_edges()

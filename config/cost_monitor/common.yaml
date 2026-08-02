@@ -1,0 +1,112 @@
+# @package _global_
+
+# Shared estimator and controller parameters for both ablation arms. Keeping
+# these in one Hydra config guarantees that agentless and enabled runs differ
+# only in the agent implementation.
+cost_prediction:
+  _target_: gigaevo.monitoring.cost_predictor.CostPrediction
+  max_mutants: ${max_mutants}
+  max_in_flight: ${max_in_flight}
+  settings:
+    _target_: gigaevo.monitoring.cost_predictor.CostPredictorSettings
+    cold_start_factor: 0.57
+    warmup_calls: 3
+    calibration_window: 5
+    golden_ratio_max: 1.10
+    golden_ratio_ramp_steps: 5
+    sparse_interval_low_mult: 0.85
+    sparse_interval_high_mult: 1.15
+    calls_per_mutation: 1.88
+    average_total_duration_s: 1397.5
+    baseline_call_count: 94
+    complexity_weight: 0.02
+    depth_weight: 0.05
+    growth_fast_mult: 1.40
+    growth_medium_mult: 1.10
+    growth_slow_mult: 0.90
+    bottleneck_mult: 1.30
+    chain_mult: 1.50
+    base_tokens_per_call: 5000
+    initial_duration_ci_low_mult: 0.60
+    initial_duration_ci_high_mult: 1.50
+    initial_token_ci_low_mult: 0.70
+    initial_token_ci_high_mult: 1.30
+    default_backpressure_utilization: 0.80
+    low_backpressure_threshold: 0.50
+    medium_backpressure_threshold: 0.80
+    low_backpressure_mult: 1.50
+    medium_backpressure_mult: 1.10
+    calibrated_ci_low_mult: 0.70
+    calibrated_ci_high_mult: 1.30
+    smoothing_ci_low_mult: 0.80
+    smoothing_ci_high_mult: 1.20
+    smoothing_min_wall_s: 0.10
+    smoothing_min_throughput: 0.001
+
+post_step_hook:
+  _target_: gigaevo.monitoring.cost_monitor_hook.CostMonitorHook
+  agent: ${cost_monitor_agent}
+  prediction: ${cost_prediction}
+
+  # Agent scheduling.
+  interval: 5
+  max_agent_calls: 12
+  cooldown_attempts: 5
+  warmup_attempts: 5
+  min_leverage: 0.15
+  disagreement_gap: 0.15
+
+  # Confidence interval and adaptive calibration.
+  ci_method: montecarlo
+  aci_alpha: 0.10
+  aci_gamma: 0.05
+  aci_scale_min: 0.50
+  aci_scale_max: 5.0
+
+  # Controller guard parameters.
+  max_relative_step: 0.30
+  reversal_step_factor: 0.50
+  lever_deadband: 0.05
+  reversal_window: 2
+  min_sustained_calls: 5
+  golden_ratio_min: 0.50
+  golden_ratio_max: 2.0
+  growth_rate_min: 0.30
+  growth_rate_max: 3.0
+  concurrency_mult_min: 0.30
+  concurrency_mult_max: 3.0
+
+  # Telemetry classification.
+  non_llm_duration_stages:
+    - CallProgramFunction
+    - CallValidatorFunction
+    - IntraMemoryStage
+  observer_stages:
+    - CostMonitorAgent
+    - NoOpCostMonitorAgent
+
+  # Empirical multiplier for the unobserved tail by attempt progress.
+  # Recompute with tools/cost_ablation/calibrate_tail.py.
+  tail_calibration:
+    - [0.05, 1.83]
+    - [0.10, 1.90]
+    - [0.15, 1.60]
+    - [0.20, 1.43]
+    - [0.25, 1.22]
+    - [0.35, 1.07]
+    - [0.50, 1.03]
+    - [1.00, 1.00]
+
+  # Measured-concurrency estimator.
+  concurrency_window_frac: 0.50
+  concurrency_min_window_s: 300.0
+  concurrency_shrink_k: 80
+  min_effective_concurrency: 0.50
+  max_effective_concurrency: 64.0
+
+  # Program-size and stage-frequency trend windows.
+  program_size_min_samples: 8
+  program_size_window_divisor: 4
+  projection_recent_min_samples: 4
+  recent_calls_limit: 20
+  fallback_backpressure_util: 0.80

@@ -116,6 +116,10 @@ class IntraMemoryPipelineBuilder(DefaultPipelineBuilder):
         mutation_mode: str | None = None,
         enable_optuna_stage: bool = False,
         optimization_time_budget: float | None = None,
+        optuna_max_parallel: int = DefaultPipelineBuilder.OPTUNA_MAX_PARALLEL,
+        optimization_time_budget_fraction: float = (
+            DEFAULT_OPTIMIZATION_TIME_BUDGET_FRACTION
+        ),
     ):
         super().__init__(
             ctx,
@@ -125,6 +129,8 @@ class IntraMemoryPipelineBuilder(DefaultPipelineBuilder):
             max_insights=max_insights,
             max_code_length=max_code_length,
             archive_gate_enabled=archive_gate_enabled,
+            optuna_max_parallel=optuna_max_parallel,
+            optimization_time_budget_fraction=optimization_time_budget_fraction,
         )
         self._enable_optuna_stage = enable_optuna_stage
         self._optimization_time_budget_arg = optimization_time_budget
@@ -295,7 +301,7 @@ class IntraMemoryPipelineBuilder(DefaultPipelineBuilder):
             self._optimization_time_budget = (
                 self._optimization_time_budget_arg
                 if self._optimization_time_budget_arg is not None
-                else self._dag_timeout_arg * DEFAULT_OPTIMIZATION_TIME_BUDGET_FRACTION
+                else self._dag_timeout_arg * self._optimization_time_budget_fraction
             )
             self._wire_optuna_stage()
 
@@ -338,6 +344,10 @@ class IntraExtraMemoryPipelineBuilder(IntraMemoryPipelineBuilder):
         mutation_mode: str | None = None,
         enable_optuna_stage: bool = False,
         optimization_time_budget: float | None = None,
+        optuna_max_parallel: int = DefaultPipelineBuilder.OPTUNA_MAX_PARALLEL,
+        optimization_time_budget_fraction: float = (
+            DEFAULT_OPTIMIZATION_TIME_BUDGET_FRACTION
+        ),
     ):
         super().__init__(
             ctx,
@@ -351,6 +361,8 @@ class IntraExtraMemoryPipelineBuilder(IntraMemoryPipelineBuilder):
             mutation_mode=mutation_mode,
             enable_optuna_stage=enable_optuna_stage,
             optimization_time_budget=optimization_time_budget,
+            optuna_max_parallel=optuna_max_parallel,
+            optimization_time_budget_fraction=optimization_time_budget_fraction,
         )
 
         memory_provider = self.ctx.memory_provider

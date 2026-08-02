@@ -1,4 +1,7 @@
 # @package _global_
+defaults:
+  - common
+  - _self_
 #
 # Live cost-monitor agent — CostMonitorAgent runs every `interval` accepted
 # mutants (post_step_hook fires once per ingestor sweep that landed a
@@ -18,21 +21,6 @@
 # when combined with pipeline=intra_extra_memory (LiveMemoryRefreshHook) —
 # the two hooks are not currently combinable (single post_step_hook slot).
 
-cost_prediction:
-  _target_: gigaevo.monitoring.cost_predictor.CostPrediction
-  max_mutants: ${max_mutants}
-  max_in_flight: ${max_in_flight}
-
 cost_monitor_agent:
   _target_: gigaevo.llm.agents.cost_monitor.CostMonitorAgent
   llm: ${ref:llm}
-
-post_step_hook:
-  _target_: gigaevo.monitoring.cost_monitor_hook.CostMonitorHook
-  agent: ${cost_monitor_agent}
-  prediction: ${cost_prediction}
-  interval: 5
-  # montecarlo beat the 1/sqrt(n) heuristic and the other two probabilistic
-  # alternatives on coverage (closest to the 90% target) when validated
-  # against the 9 collected logs — see tools/cost_ablation/compare_ci_methods.py.
-  ci_method: montecarlo

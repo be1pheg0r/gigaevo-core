@@ -18,6 +18,8 @@ pipeline_builder:
   max_insights: ${max_insights}
   max_code_length: ${max_code_length}
   optimization_time_budget: ${optimization_time_budget}
+  optimization_time_budget_fraction: ${optimization_time_budget_fraction}
+  optuna_max_parallel: ${optuna_max_parallel}
 
 dag_blueprint:
   _target_: gigaevo.config.helpers.build_dag_from_builder
