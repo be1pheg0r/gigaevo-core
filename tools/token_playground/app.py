@@ -37,6 +37,10 @@ from run_ablation import find_free_dbs, launch  # noqa: E402
 
 PORT = int(os.environ.get("TOKEN_PLAYGROUND_PORT", "8092"))
 LLM_CONFIG = os.environ.get("TOKEN_PLAYGROUND_LLM", "single")
+LLM_BASE_URL = os.environ.get(
+    "TOKEN_PLAYGROUND_LLM_BASE_URL", "http://82.202.156.206:8080/v1"
+)
+LLM_MODEL_NAME = os.environ.get("TOKEN_PLAYGROUND_MODEL_NAME", "qwen3.6-35b-a3b")
 
 # These are product safety limits, not user-configurable defaults.
 PROBE_ATTEMPTS = 10
@@ -374,6 +378,10 @@ async def start_estimate(body: EstimateRequest, request: Request) -> dict[str, A
             )
 
         if probe is None:
+            if not os.environ.get("OPENAI_API_KEY"):
+                raise HTTPException(
+                    503, "LLM-сервер временно не настроен. Сообщите оператору playground."
+                )
             ip = _client_ip(request)
             last = _ip_last_start.get(ip, 0.0)
             if now - last < IP_COOLDOWN_S:
@@ -394,7 +402,16 @@ async def start_estimate(body: EstimateRequest, request: Request) -> dict[str, A
             run_id = secrets.token_hex(6)
             log = _probe_log_path(body.task, run_id)
             process = launch(
-                body.task, db, PROBE_ATTEMPTS, LLM_CONFIG, "agentless", log
+                body.task,
+                db,
+                PROBE_ATTEMPTS,
+                LLM_CONFIG,
+                "agentless",
+                log,
+                overrides=[
+                    f"llm_base_url={LLM_BASE_URL}",
+                    f"model_name={LLM_MODEL_NAME}",
+                ],
             )
             probe = ProbeRun(task=body.task, process=process, log=log, started_at=now)
             _active = probe
@@ -460,6 +477,7 @@ def selftest() -> None:
     )
     assert PROBE_ATTEMPTS == 10 and MAX_ACTIVE_PROBES == 1 and IP_COOLDOWN_S == 30
     assert DISPLAY_INTERVAL_FRACTION == 0.03
+    assert LLM_CONFIG == "single" and LLM_BASE_URL.startswith("http") and LLM_MODEL_NAME
     assert TASK_CATALOG and all(_problem_exists(task) for task in TASK_CATALOG)
     alphaevolve_root = REPO / "problems" / "alphaevolve"
     discovered_tasks = {
