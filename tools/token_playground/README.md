@@ -28,10 +28,8 @@ python3 tools/token_playground/app.py --selftest
 setsid nohup python3 tools/token_playground/app.py > ~/token_playground.log 2>&1 < /dev/null &
 ```
 
-The app binds to `127.0.0.1:8092` and requires `OPENAI_API_KEY`. Optional
-operator-only environment variables are `TOKEN_PLAYGROUND_PORT`,
-`TOKEN_PLAYGROUND_LLM`, `TOKEN_PLAYGROUND_LLM_BASE_URL`, and
-`TOKEN_PLAYGROUND_MODEL_NAME`.
+The app binds to `127.0.0.1:8092`. Optional operator-only environment
+variables are `TOKEN_PLAYGROUND_PORT` and `TOKEN_PLAYGROUND_LLM`.
 
 Recommended nginx location:
 

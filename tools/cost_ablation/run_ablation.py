@@ -65,7 +65,6 @@ def launch(
     cost_monitor: str,
     log_path: Path,
     seed: int | None = None,
-    overrides: list[str] | None = None,
 ) -> subprocess.Popen:
     cmd = [
         "python3",
@@ -79,8 +78,6 @@ def launch(
     ]
     if seed is not None:
         cmd.append(f"+seed={seed}")
-    if overrides:
-        cmd.extend(overrides)
     log_f = open(log_path, "w", encoding="utf-8")
     return subprocess.Popen(
         cmd,

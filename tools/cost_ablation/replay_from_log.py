@@ -196,7 +196,6 @@ def hook_from_log(
     *,
     max_in_flight: int | None = None,
     ci_method: str | None = "montecarlo",
-    infer_attempts_from_llm: bool = False,
 ) -> CostMonitorHook | None:
     """Replay a log's raw events into a fresh hook and hand the hook back.
 
@@ -250,23 +249,13 @@ def hook_from_log(
     # source log a second time into whatever process called this.
     logger.disable("gigaevo.monitoring")
     try:
-        synthetic_attempt = 0
         for name, payload, ts in events:
-            if infer_attempts_from_llm and name == "MUTATION_ATTEMPTED":
-                continue
             clock_now[0] = ts
             try:
                 event = EVENT_CLASSES[name](**payload)
             except Exception:
                 continue
             emit(event)
-            if (
-                infer_attempts_from_llm
-                and isinstance(event, LLMCall)
-                and event.stage.startswith("Mutation")
-            ):
-                synthetic_attempt += 1
-                emit(MutationAttempted(mutant_id=f"replayed-llm-{synthetic_attempt}"))
     finally:
         logger.enable("gigaevo.monitoring")
     return hook
