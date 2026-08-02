@@ -55,22 +55,22 @@ API_RATE_WINDOW_S = 60
 MAX_API_REQUESTS_PER_WINDOW = 180
 
 TASK_CATALOG = {
-    "alphaevolve_packing_circles_n_26": {
+    "alphaevolve/packing_circles/n_26": {
         "label": "Packing Circles · 26",
         "family": "Geometry",
         "note": "Упаковка 26 равных окружностей в единичный квадрат.",
     },
-    "alphaevolve_heilbronn_convex_points_13": {
+    "alphaevolve/heilbronn_convex/points_13": {
         "label": "Heilbronn · 13 points",
         "family": "Geometry",
         "note": "Максимизация площади минимального треугольника.",
     },
-    "alphaevolve_erdos_minimum_overlap": {
+    "alphaevolve/erdos_minimum_overlap": {
         "label": "Erdős Minimum Overlap",
         "family": "Combinatorics",
         "note": "Поиск конструкции с минимальным перекрытием.",
     },
-    "alphaevolve_first_autocorr_ineq": {
+    "alphaevolve/first_autocorr_ineq": {
         "label": "Autocorrelation Inequality",
         "family": "Analysis",
         "note": "Улучшение первой автокорреляционной оценки.",
@@ -133,7 +133,8 @@ def _client_ip(request: Request) -> str:
 
 
 def _problem_exists(task: str) -> bool:
-    return (REPO / "problems" / task / "entrypoint.py").is_file()
+    problem = REPO / "problems" / task
+    return (problem / "validate.py").is_file() and (problem / "metrics.yaml").is_file()
 
 
 def _load_hook(probe: ProbeRun) -> Any | None:
@@ -390,7 +391,8 @@ def selftest() -> None:
     forbidden_segments = {"experiment", "experiments", "launch", "stop", "log", "logs"}
     assert not any(forbidden_segments.intersection(path.strip("/").split("/")) for path in public_paths)
     assert PROBE_ATTEMPTS == 10 and MAX_ACTIVE_PROBES == 1
-    assert EstimateRequest(task="alphaevolve_packing_circles_n_26").attempts <= MAX_TARGET_ATTEMPTS
+    assert TASK_CATALOG and all(_problem_exists(task) for task in TASK_CATALOG)
+    assert EstimateRequest(task="alphaevolve/packing_circles/n_26").attempts <= MAX_TARGET_ATTEMPTS
     try:
         EstimateRequest(task="x", attempts=MAX_TARGET_ATTEMPTS + 1)
     except ValueError:
