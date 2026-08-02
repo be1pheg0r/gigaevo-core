@@ -263,7 +263,6 @@ def hook_from_log(
             if (
                 infer_attempts_from_llm
                 and isinstance(event, LLMCall)
-                and event.ok
                 and event.stage.startswith("Mutation")
             ):
                 synthetic_attempt += 1

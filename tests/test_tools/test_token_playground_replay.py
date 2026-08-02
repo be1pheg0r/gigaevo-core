@@ -14,7 +14,7 @@ def test_infers_failed_mutation_attempts_from_llm_calls(tmp_path):
             "endpoint": "",
             "model": "test-model",
             "attempt": 1,
-            "ok": True,
+            "ok": index == 1,
             "latency_ms": 1000,
             "tokens_in": tokens - 20,
             "tokens_out": 20,
