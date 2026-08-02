@@ -66,7 +66,7 @@ function renderWaiting(source) {
     <div class="probe-state">
       <div class="probe-state__spinner" aria-hidden="true"></div>
       <h2>${sourceText}</h2>
-      <p>Страница обновится сама. Новый эксперимент здесь не создаётся: фактический прогон остановится на 10 попытках.</p>
+      <p>Страница обновится сама.</p>
     </div>`;
 }
 
