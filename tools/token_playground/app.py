@@ -59,20 +59,70 @@ TASK_CATALOG = {
         "family": "Geometry",
         "note": "Упаковка 26 равных окружностей в единичный квадрат.",
     },
+    "alphaevolve/packing_circles/n_32": {
+        "label": "Packing Circles · 32",
+        "family": "Geometry",
+        "note": "Упаковка 32 равных окружностей в единичный квадрат.",
+    },
     "alphaevolve/heilbronn_convex/points_13": {
         "label": "Heilbronn · 13 points",
         "family": "Geometry",
         "note": "Максимизация площади минимального треугольника.",
+    },
+    "alphaevolve/heilbronn_convex/points_14": {
+        "label": "Heilbronn · 14 points",
+        "family": "Geometry",
+        "note": "Размещение 14 точек с максимальной площадью минимального треугольника.",
+    },
+    "alphaevolve/minimize_max_min_dist_ratio/2_dimensions": {
+        "label": "Distance Ratio · 2D",
+        "family": "Geometry",
+        "note": "Минимизация отношения максимального расстояния к минимальному на плоскости.",
+    },
+    "alphaevolve/minimize_max_min_dist_ratio/3_dimensions": {
+        "label": "Distance Ratio · 3D",
+        "family": "Geometry",
+        "note": "Минимизация отношения максимального расстояния к минимальному в пространстве.",
     },
     "alphaevolve/erdos_minimum_overlap": {
         "label": "Erdős Minimum Overlap",
         "family": "Combinatorics",
         "note": "Поиск конструкции с минимальным перекрытием.",
     },
+    "alphaevolve/sums_diffs_finite_sets": {
+        "label": "Sums & Differences of Finite Sets",
+        "family": "Combinatorics",
+        "note": "Оптимизация соотношения сумм и разностей конечных множеств.",
+    },
+    "alphaevolve/matrix_multiplication/2_4_5": {
+        "label": "Matrix Multiplication · 2×4×5",
+        "family": "Algebra",
+        "note": "Поиск эффективной схемы матричного умножения размера 2×4×5.",
+    },
     "alphaevolve/first_autocorr_ineq": {
-        "label": "Autocorrelation Inequality",
+        "label": "First Autocorrelation Inequality",
         "family": "Analysis",
         "note": "Улучшение первой автокорреляционной оценки.",
+    },
+    "alphaevolve/second_autocorr_ineq": {
+        "label": "Second Autocorrelation Inequality",
+        "family": "Analysis",
+        "note": "Улучшение второй автокорреляционной оценки.",
+    },
+    "alphaevolve/second_autocorr_ineq_improver": {
+        "label": "Second Autocorrelation · Improver",
+        "family": "Analysis",
+        "note": "Улучшение найденных решений второй автокорреляционной задачи.",
+    },
+    "alphaevolve/third_autocorr_ineq": {
+        "label": "Third Autocorrelation Inequality",
+        "family": "Analysis",
+        "note": "Улучшение третьей автокорреляционной оценки.",
+    },
+    "alphaevolve/uncertainty_inequality": {
+        "label": "Uncertainty Inequality",
+        "family": "Analysis",
+        "note": "Поиск усиленной конструкции для неравенства неопределённости.",
     },
 }
 
@@ -377,6 +427,13 @@ def selftest() -> None:
     assert not any(forbidden_segments.intersection(path.strip("/").split("/")) for path in public_paths)
     assert PROBE_ATTEMPTS == 10 and MAX_ACTIVE_PROBES == 1
     assert TASK_CATALOG and all(_problem_exists(task) for task in TASK_CATALOG)
+    alphaevolve_root = REPO / "problems" / "alphaevolve"
+    discovered_tasks = {
+        "alphaevolve/" + metrics.parent.relative_to(alphaevolve_root).as_posix()
+        for metrics in alphaevolve_root.rglob("metrics.yaml")
+        if (metrics.parent / "validate.py").is_file()
+    }
+    assert set(TASK_CATALOG) == discovered_tasks
     probe_log = _probe_log_path("alphaevolve/packing_circles/n_26", "abc123")
     assert probe_log.parent == PROBE_DIR and probe_log.name == "probe_alphaevolve__packing_circles__n_26_abc123.log"
     assert EstimateRequest(task="alphaevolve/packing_circles/n_26").attempts <= MAX_TARGET_ATTEMPTS

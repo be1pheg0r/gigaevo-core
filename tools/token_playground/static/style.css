@@ -38,7 +38,7 @@ h1 { margin: 0; font: 680 clamp(48px, 6vw, 82px)/.94 "Bahnschrift SemiCondensed"
 .control-block { border: 0; margin: 0 0 34px; padding: 0; }
 .control-block legend { display: flex; align-items: center; gap: 11px; margin-bottom: 18px; font: 650 15px/1 "Bahnschrift", sans-serif; }
 .control-block legend span { display: grid; place-items: center; width: 24px; height: 24px; border: 1px solid #a9b6cd; color: var(--blue); font: 700 12px/1 "Consolas", monospace; }
-.tasks { display: grid; gap: 8px; }
+.tasks { display: grid; gap: 8px; max-height: 510px; overflow-y: auto; padding-right: 5px; scrollbar-color: #a9b6cd transparent; }
 .task { position: relative; display: grid; grid-template-columns: 23px 1fr; gap: 10px; align-items: center; min-height: 66px; padding: 12px 14px; border: 1px solid var(--line); cursor: pointer; transition: border-color .15s, background .15s, transform .15s; }
 .task:hover { border-color: #97abd2; transform: translateX(2px); }
 .task:has(input:checked) { border-color: var(--blue); background: var(--pale); box-shadow: inset 3px 0 var(--blue); }

@@ -114,13 +114,13 @@ function renderResult(answer) {
 async function poll() {
   try {
     const data = await request(`api/estimate/${state.job}`);
-    if (data.answer) renderResult(data.answer);
     if (data.failed || data.timed_out) {
       clearInterval(state.timer);
       renderError(data.timed_out ? "Короткий замер превысил лимит времени и был остановлен." : "Пробный прогон завершился без достаточной телеметрии.");
       $("#measure").disabled = false;
     } else if (!data.alive && data.answer) {
       clearInterval(state.timer);
+      renderResult(data.answer);
       $("#measure").disabled = false;
       loadCatalog();
     }

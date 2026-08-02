@@ -4,7 +4,7 @@ Public, resource-bounded UI for `CostMonitorHook.project_tokens()`.
 
 The browser can request a projection for 25–1000 mutation attempts and a
 budget up to 20M tokens. Every new measurement launches exactly 10 real attempts for
-one of four curated tasks. The probe size, LLM configuration, Hydra options,
+one of the available AlphaEvolve tasks. The probe size, LLM configuration, Hydra options,
 Redis DB and command line are not accepted from the request.
 
 Safety limits are intentionally constants in `app.py`:
