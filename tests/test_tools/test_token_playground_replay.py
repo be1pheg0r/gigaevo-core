@@ -24,6 +24,16 @@ def test_infers_failed_mutation_attempts_from_llm_calls(tmp_path):
             f"2026-08-02 12:00:0{index}.000 | INFO | [LLM_CALL] "
             + json.dumps(payload)
         )
+        if index == 1:
+            attempted = {
+                "event": "MUTATION_ATTEMPTED",
+                "run_label": None,
+                "mutant_id": "accepted-mutant",
+            }
+            lines.append(
+                "2026-08-02 12:00:01.500 | INFO | [MUTATION_ATTEMPTED] "
+                + json.dumps(attempted)
+            )
     log = tmp_path / "probe.log"
     log.write_text("\n".join(lines), encoding="utf-8")
 

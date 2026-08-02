@@ -236,7 +236,6 @@ def hook_from_log(
     if not events:
         return None
 
-    has_mutation_attempts = any(name == "MUTATION_ATTEMPTED" for name, _, _ in events)
     reset_subscribers()
     clock_now = [0.0]
     pred = CostPrediction(max_mutants=1, max_in_flight=max_in_flight or 8)
@@ -253,6 +252,8 @@ def hook_from_log(
     try:
         synthetic_attempt = 0
         for name, payload, ts in events:
+            if infer_attempts_from_llm and name == "MUTATION_ATTEMPTED":
+                continue
             clock_now[0] = ts
             try:
                 event = EVENT_CLASSES[name](**payload)
@@ -261,7 +262,6 @@ def hook_from_log(
             emit(event)
             if (
                 infer_attempts_from_llm
-                and not has_mutation_attempts
                 and isinstance(event, LLMCall)
                 and event.ok
                 and event.stage.startswith("Mutation")
