@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>GigaEvo · бюджет токенов</title>
+  <link rel="stylesheet" href="static/style.css">
+  <script src="static/app.js" defer></script>
+</head>
+<body>
+  <main class="shell">
+    <header class="masthead">
+      <div class="brand" aria-label="GigaEvo">
+        <span class="brand__mark">GE</span>
+        <span>GigaEvo</span>
+        <span class="brand__slash">/</span>
+        <span class="brand__muted">token probe</span>
+      </div>
+      <div class="service" id="service-state"><i></i><span>проверяю сервис</span></div>
+    </header>
+
+    <section class="hero">
+      <p class="eyebrow">Короткий замер → полный бюджет</p>
+      <h1>Во сколько токенов<br>обойдётся эволюция?</h1>
+      <p class="lede">Выберите задачу и горизонт. Playground измерит первые 10 попыток и экстраполирует стоимость тем же оценщиком, который работает внутри GigaEvo.</p>
+    </section>
+
+    <section class="workbench" aria-label="Калькулятор бюджета">
+      <div class="controls">
+        <fieldset class="control-block">
+          <legend><span>1</span> Задача</legend>
+          <div class="tasks" id="tasks" aria-live="polite">
+            <div class="skeleton"></div><div class="skeleton"></div>
+          </div>
+        </fieldset>
+
+        <fieldset class="control-block">
+          <legend><span>2</span> Горизонт</legend>
+          <label class="range-row" for="attempts">
+            <span>Попыток мутации</span>
+            <output id="attempts-out">250</output>
+          </label>
+          <input id="attempts" type="range" min="25" max="1000" step="25" value="250">
+          <div class="range-scale"><span>25</span><span>1 000</span></div>
+
+          <label class="range-row range-row--budget" for="budget">
+            <span>Доступный бюджет</span>
+            <output id="budget-out">3,0 млн</output>
+          </label>
+          <input id="budget" type="range" min="100000" max="20000000" step="100000" value="3000000">
+          <div class="range-scale"><span>100 тыс.</span><span>20 млн</span></div>
+        </fieldset>
+
+        <button class="measure" id="measure" disabled>
+          <span>Измерить на 10 попытках</span>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h13M14 7l5 5-5 5"/></svg>
+        </button>
+        <p class="guardrail">Фактический запуск всегда ограничен 10 попытками. Большой эксперимент через эту страницу запустить нельзя.</p>
+      </div>
+
+      <aside class="receipt" id="receipt" aria-live="polite">
+        <div class="receipt__top">
+          <span>Предварительная смета</span>
+          <span class="mono"># ———</span>
+        </div>
+        <div class="empty-state">
+          <div class="token-roll" aria-hidden="true">
+            <span></span><span></span><span></span><span></span><span></span>
+          </div>
+          <h2>Здесь появится ответ</h2>
+          <p>Не только точечный прогноз, но и диапазон, на который разумно планировать бюджет.</p>
+        </div>
+      </aside>
+    </section>
+
+    <footer>
+      <p>Прогноз — не лимит расходов. Остановка эволюции остаётся ответственностью оператора.</p>
+      <p class="mono">AIRI Summer School · 2026</p>
+    </footer>
+  </main>
+</body>
+</html>
