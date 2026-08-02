@@ -3,7 +3,7 @@
 Public, resource-bounded UI for `CostMonitorHook.project_tokens()`.
 
 The browser can request a projection for 25–1000 mutation attempts and a
-budget up to 20M tokens. A cache miss launches exactly 10 real attempts for
+budget up to 20M tokens. Every new measurement launches exactly 10 real attempts for
 one of four curated tasks. The probe size, LLM configuration, Hydra options,
 Redis DB and command line are not accepted from the request.
 
@@ -14,7 +14,6 @@ Safety limits are intentionally constants in `app.py`:
 - 15 minute hard timeout;
 - one new probe per IP per 10 minutes;
 - 12 new probes per process per 24 hours;
-- six-hour result cache per task;
 - 4 KiB request-body limit;
 - 180 API requests per IP per minute and at most 500 live result handles;
 - no experiment, log, stop, shell or generic launch routes.
@@ -45,5 +44,5 @@ location /tokens/ {
 }
 ```
 
-Do not run uvicorn with multiple workers: the global probe lock, cache and
-rate limits are intentionally process-local.
+Do not run uvicorn with multiple workers: the global probe lock, active-job
+state and rate limits are intentionally process-local.

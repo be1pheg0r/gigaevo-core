@@ -45,8 +45,7 @@ function renderCatalog(data) {
       <span class="task__copy">
         <span class="task__name">${task.label}</span>
         <span class="task__note">${task.note}</span>
-      </span>
-      ${task.cached ? '<span class="task__cache">кеш</span>' : ""}`;
+      </span>`;
     label.querySelector("input").addEventListener("change", () => {
       state.task = task.name;
       $("#measure").disabled = false;
@@ -61,11 +60,11 @@ function renderCatalog(data) {
 }
 
 function renderWaiting(source) {
-  const sourceText = source === "cache" ? "Читаю готовый замер" : source === "shared_probe" ? "Подключаюсь к текущему замеру" : "Измеряю первые 10 попыток";
+  const sourceText = source === "shared_probe" ? "Подключаюсь к текущему замеру" : "Измеряю первые 10 попыток";
   $("#receipt").innerHTML = `
     <div class="receipt__top"><span>Расчёт выполняется</span><span class="mono"># ${state.job.slice(0, 6)}</span></div>
     <div class="probe-state">
-      <div class="probe-state__meter"><i></i></div>
+      <div class="probe-state__spinner" aria-hidden="true"></div>
       <h2>${sourceText}</h2>
       <p>Страница обновится сама. Новый эксперимент здесь не создаётся: фактический прогон остановится на 10 попытках.</p>
     </div>`;
@@ -107,7 +106,7 @@ function renderResult(answer) {
       <div class="reach">
         <div class="reach__big">Имеющегося бюджета хватит на ${attemptsText}</div>
         <p>Диапазон использует медиану и верхний квартиль стоимости: левая граница — осторожный сценарий.</p>
-        <span class="source">${answer.cache_hit ? "готовый кеш" : `измерено на ${answer.observed_attempts} попытках`}</span>
+        <span class="source">измерено на ${answer.observed_attempts} попытках</span>
       </div>
     </div>`;
 }

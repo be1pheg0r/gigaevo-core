@@ -3,7 +3,7 @@
 
 This service deliberately exposes only the token projection from CostMonitor.
 It has no route for launching an experiment, choosing an LLM, changing the
-probe size, reading logs, or stopping arbitrary processes. Every cache miss
+probe size, reading logs, or stopping arbitrary processes. Every new measurement
 runs exactly ``PROBE_ATTEMPTS`` mutations for a curated task, with one probe
 allowed at a time.
 """
@@ -47,7 +47,6 @@ MAX_BUDGET_TOKENS = 20_000_000
 MAX_ACTIVE_PROBES = 1
 MAX_DAILY_PROBES = 12
 IP_COOLDOWN_S = 10 * 60
-CACHE_TTL_S = 6 * 60 * 60
 MAX_REQUEST_BYTES = 4_096
 MAX_JOBS = 500
 JOB_TTL_S = 60 * 60
@@ -104,7 +103,6 @@ class EstimateJob:
     attempts: int
     budget_tokens: int
     probe: ProbeRun
-    cache_hit: bool
     answer_stamp: tuple[int, int] | None = None
     answer: dict[str, Any] | None = None
     created_at: float = field(default_factory=time.time)
@@ -119,7 +117,6 @@ app = FastAPI(
 
 _start_lock = asyncio.Lock()
 _active: ProbeRun | None = None
-_cache: dict[str, ProbeRun] = {}
 _jobs: dict[str, EstimateJob] = {}
 _starts_24h: deque[float] = deque()
 _ip_last_start: dict[str, float] = {}
@@ -169,22 +166,9 @@ def _refresh_active() -> ProbeRun | None:
     if _active.process.poll() is None:
         return _active
     _active.completed_at = _active.completed_at or now
-    if _load_hook(_active) is not None and not _active.timed_out:
-        _cache[_active.task] = _active
     finished = _active
     _active = None
     return finished
-
-
-def _cached_probe(task: str) -> ProbeRun | None:
-    probe = _cache.get(task)
-    if probe is None:
-        return None
-    completed = probe.completed_at or 0.0
-    if time.time() - completed > CACHE_TTL_S:
-        _cache.pop(task, None)
-        return None
-    return probe
 
 
 def _projection(job: EstimateJob) -> dict[str, Any] | None:
@@ -212,7 +196,6 @@ def _projection(job: EstimateJob) -> dict[str, Any] | None:
         "interval": [round(lo), round(hi)],
         "verdict": "fits" if fits else ("tight" if point <= job.budget_tokens else "over"),
         "affordable_attempts": [min(n_lo, n_hi), max(n_lo, n_hi)],
-        "cache_hit": job.cache_hit,
     }
     job.answer_stamp = stamp
     job.answer = answer
@@ -284,7 +267,7 @@ async def catalog() -> dict[str, Any]:
     now = time.time()
     _prune_limits(now)
     tasks = [
-        {"name": name, **meta, "cached": _cached_probe(name) is not None}
+        {"name": name, **meta}
         for name, meta in TASK_CATALOG.items()
         if _problem_exists(name)
     ]
@@ -315,9 +298,8 @@ async def start_estimate(body: EstimateRequest, request: Request) -> dict[str, A
         if len(_jobs) >= MAX_JOBS:
             raise HTTPException(503, "Очередь playground заполнена. Попробуйте позже.")
 
-        probe = _cached_probe(body.task)
-        cache_hit = probe is not None
-        if probe is None and _active is not None and _active.task == body.task:
+        probe = None
+        if _active is not None and _active.task == body.task:
             probe = _active
         if probe is None and _active is not None:
             raise HTTPException(429, "Сейчас идёт другая прикидка. Попробуйте через несколько минут.")
@@ -329,7 +311,7 @@ async def start_estimate(body: EstimateRequest, request: Request) -> dict[str, A
                 wait_s = round(IP_COOLDOWN_S - (now - last))
                 raise HTTPException(429, f"Для нового замера с этого адреса подождите {wait_s} с.")
             if len(_starts_24h) >= MAX_DAILY_PROBES:
-                raise HTTPException(429, "Дневной лимит новых замеров исчерпан. Кешированные оценки доступны.")
+                raise HTTPException(429, "Дневной лимит новых замеров исчерпан.")
             try:
                 db = find_free_dbs(1)[0]
             except (RuntimeError, OSError) as exc:
@@ -351,13 +333,12 @@ async def start_estimate(body: EstimateRequest, request: Request) -> dict[str, A
             attempts=body.attempts,
             budget_tokens=body.budget_tokens,
             probe=probe,
-            cache_hit=cache_hit,
         )
         _jobs[job_id] = job
         return {
             "job_id": job_id,
             "probe_attempts": PROBE_ATTEMPTS,
-            "source": "cache" if cache_hit else ("shared_probe" if probe is _active and probe.started_at < now else "new_probe"),
+            "source": "shared_probe" if probe is _active and probe.started_at < now else "new_probe",
         }
 
 

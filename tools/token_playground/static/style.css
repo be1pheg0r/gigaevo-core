@@ -39,14 +39,13 @@ h1 { margin: 0; font: 680 clamp(48px, 6vw, 82px)/.94 "Bahnschrift SemiCondensed"
 .control-block legend { display: flex; align-items: center; gap: 11px; margin-bottom: 18px; font: 650 15px/1 "Bahnschrift", sans-serif; }
 .control-block legend span { display: grid; place-items: center; width: 24px; height: 24px; border: 1px solid #a9b6cd; color: var(--blue); font: 700 12px/1 "Consolas", monospace; }
 .tasks { display: grid; gap: 8px; }
-.task { position: relative; display: grid; grid-template-columns: 23px 1fr auto; gap: 10px; align-items: center; min-height: 66px; padding: 12px 14px; border: 1px solid var(--line); cursor: pointer; transition: border-color .15s, background .15s, transform .15s; }
+.task { position: relative; display: grid; grid-template-columns: 23px 1fr; gap: 10px; align-items: center; min-height: 66px; padding: 12px 14px; border: 1px solid var(--line); cursor: pointer; transition: border-color .15s, background .15s, transform .15s; }
 .task:hover { border-color: #97abd2; transform: translateX(2px); }
 .task:has(input:checked) { border-color: var(--blue); background: var(--pale); box-shadow: inset 3px 0 var(--blue); }
 .task input { width: 16px; height: 16px; accent-color: var(--blue); }
 .task__copy { display: grid; gap: 3px; }
 .task__name { font-weight: 650; font-size: 14px; }
 .task__note { color: var(--muted); font-size: 12px; }
-.task__cache { color: var(--good); font: 700 10px/1 "Consolas", monospace; letter-spacing: .08em; text-transform: uppercase; }
 .skeleton { height: 66px; background: linear-gradient(90deg, #edf1f7 25%, #f7f9fc 50%, #edf1f7 75%); background-size: 200% 100%; animation: load 1.2s infinite; }
 
 .range-row { display: flex; justify-content: space-between; align-items: baseline; color: var(--muted); font-size: 13px; }
@@ -75,8 +74,7 @@ input[type="range"]::-moz-range-thumb { width: 12px; height: 12px; border: 4px s
 .token-roll span:nth-child(1) { height: 25%; }.token-roll span:nth-child(2) { height: 42%; }.token-roll span:nth-child(3) { height: 61%; }.token-roll span:nth-child(4) { height: 78%; }.token-roll span:nth-child(5) { height: 100%; background: var(--blue); border-color: var(--blue); }
 
 .probe-state { position: relative; z-index: 1; margin: auto 0; }
-.probe-state__meter { height: 8px; margin-bottom: 27px; overflow: hidden; background: #dce5f4; }
-.probe-state__meter i { display: block; width: 40%; height: 100%; background: linear-gradient(90deg, var(--blue), var(--cyan)); animation: probe 1.2s ease-in-out infinite alternate; }
+.probe-state__spinner { width: 52px; height: 52px; margin-bottom: 28px; border: 5px solid #dce5f4; border-top-color: var(--blue); border-right-color: var(--blue); border-radius: 50%; animation: spin .8s linear infinite; }
 .probe-state h2 { max-width: 450px; margin: 0 0 10px; font: 650 31px/1.1 "Bahnschrift SemiCondensed", sans-serif; }
 .probe-state p { color: var(--muted); line-height: 1.55; }
 
@@ -101,7 +99,7 @@ footer p { margin: 0; }
 
 button:focus-visible, input:focus-visible, .task:has(input:focus-visible) { outline: 3px solid rgba(32,198,232,.45); outline-offset: 3px; }
 @keyframes load { to { background-position: -200% 0; } }
-@keyframes probe { from { transform: translateX(-40%); } to { transform: translateX(190%); } }
+@keyframes spin { to { transform: rotate(360deg); } }
 
 @media (max-width: 850px) {
   .hero { grid-template-columns: 1fr; gap: 22px; padding-top: 52px; }
