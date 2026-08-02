@@ -250,8 +250,7 @@ async def public_safety_headers(request: Request, call_next):
         "default-src 'self'; script-src 'self'; style-src 'self'; "
         "img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'"
     )
-    if request.url.path.startswith("/api/"):
-        response.headers["Cache-Control"] = "no-store"
+    response.headers["Cache-Control"] = "no-store"
     return response
 
 

@@ -16,6 +16,7 @@ Safety limits are intentionally constants in `app.py`:
 - 12 new probes per process per 24 hours;
 - 4 KiB request-body limit;
 - 180 API requests per IP per minute and at most 500 live result handles;
+- no reuse of completed measurements and `no-store` on every response;
 - no experiment, log, stop, shell or generic launch routes.
 
 Run:
