@@ -4,10 +4,10 @@ Web console for the cost-prediction ablation: pick tasks, launch the runs,
 watch them, then read whether `CostMonitorAgent` beat the automatic
 estimator — at 5%, 10%, 15% … of run progress, not just at the end.
 
-## Run it on the summer-school server
+## Run it on a remote server
 
 ```bash
-ssh User10@82.202.156.206
+ssh "$GIGAEVO_HOST"
 cd ~/gigaevo-core
 setsid nohup python3 tools/cost_lab_web/app.py > ~/cost_lab_web.log 2>&1 < /dev/null &
 ```
@@ -16,7 +16,7 @@ Port 8091 by default (`COST_LAB_PORT` to change it).
 
 ## Reach it from your laptop
 
-<http://82.202.156.206:8080/costlab/> — no tunnel needed.
+Open `$GIGAEVO_BASE_URL/costlab/`.
 
 The firewall only lets 80/443/8080 through, so the console is published by
 the same user-owned nginx that fronts the 35B model (`~/nginx.conf`, runs as
@@ -43,12 +43,12 @@ After editing `~/nginx.conf`, always:
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/health              # LLM must still answer
 ```
 
-That nginx serves the model for the whole summer school — reload, never
-restart, and check `/health` afterwards. Backups are kept as
+That nginx may also serve the model — reload, never restart, and check
+`/health` afterwards. Backups are kept as
 `~/nginx.conf.bak.<timestamp>`.
 
 If nginx is ever down, the tunnel still works as a fallback:
-`ssh -N -L 8091:127.0.0.1:8091 User10@82.202.156.206` → <http://127.0.0.1:8091/>.
+`ssh -N -L 8091:127.0.0.1:8091 "$GIGAEVO_HOST"` → <http://127.0.0.1:8091/>.
 
 ## The three views
 

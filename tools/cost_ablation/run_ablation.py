@@ -2,12 +2,12 @@
 """Launch with-agent / without-agent cost-prediction ablation runs for a set
 of gigaevo problems, wait for completion, then build the comparison report.
 
-Usage (from repo root, e.g. on the summer-school server):
+Usage (from repo root):
 
     python3 tools/cost_ablation/run_ablation.py \\
         --tasks algotune/algotune_lqr algotune/algotune_markowitz \\
                 adversarial/code/pop_a toy_kadane \\
-        --max-mutants 100 --llm summer_school_servers \\
+        --max-mutants 100 --llm single \\
         --out-dir experiments/cost_ablation_$(date +%Y%m%d_%H%M%S)
 
 Each task is launched twice: once with ``+cost_monitor=enabled`` (the real
@@ -202,7 +202,7 @@ def main() -> None:
         help="problem.name values, e.g. algotune/algotune_lqr toy_kadane",
     )
     ap.add_argument("--max-mutants", type=int, default=100)
-    ap.add_argument("--llm", default="summer_school_servers")
+    ap.add_argument("--llm", default="single")
     ap.add_argument(
         "--out-dir",
         required=True,

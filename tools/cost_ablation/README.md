@@ -10,7 +10,7 @@ that session's report.
 ## Usage
 
 ```bash
-python3 tools/cost_ablation/run_ablation.py     --tasks algotune/algotune_lqr algotune/algotune_markowitz             adversarial/code/pop_a toy_kadane     --max-mutants 100 --llm summer_school_servers     --out-dir experiments/cost_ablation_$(date +%Y%m%d_%H%M%S)
+python3 tools/cost_ablation/run_ablation.py     --tasks algotune/algotune_lqr algotune/algotune_markowitz             adversarial/code/pop_a toy_kadane     --max-mutants 100 --llm single     --out-dir experiments/cost_ablation_$(date +%Y%m%d_%H%M%S)
 ```
 
 This launches 2×N `nohup python3 run.py ...` runs on auto-picked empty

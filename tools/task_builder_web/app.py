@@ -8,7 +8,7 @@ a small seed run (`run.py ... +cost_monitor=enabled`) -> tail its log,
 parsing the [CostMonitorHookJSON] lines CostMonitorHook already emits
 into a live predicted-vs-actual series for the frontend's Plotly charts.
 
-Run: SUMMER_SCHOOL_LLM_KEY_A=... python tools/task_builder_web/app.py
+Run: OPENAI_API_KEY=... python tools/task_builder_web/app.py
 """
 
 from __future__ import annotations
@@ -47,6 +47,10 @@ from gigaevo.problems.task_creator import _validate_problem_name  # noqa: E402
 CATEGORIES_PATH = REPO / "config" / "task_builder" / "categories.yaml"
 LOGS_DIR = REPO / "experiments" / "task_builder_web"
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
+LLM_MODEL = os.environ.get("TASK_BUILDER_LLM_MODEL", "gpt-5-mini")
+LLM_BASE_URL = os.environ.get("TASK_BUILDER_LLM_BASE_URL")
+LLM_API_KEY_ENV = os.environ.get("TASK_BUILDER_LLM_API_KEY_ENV", "OPENAI_API_KEY")
+EVOLUTION_LLM_CONFIG = os.environ.get("TASK_BUILDER_EVOLUTION_LLM", "single")
 MAX_MUTANTS = 12
 SEED_TIMEOUT_S = 900
 REDIS_DB_POOL = list(range(50, 60))
@@ -62,9 +66,9 @@ def _make_llm() -> ChatOpenAI:
     auto-fixes/retries; the 35B is also the faster single-request model
     per the AIRI server benchmarks)."""
     return ChatOpenAI(
-        model="qwen3.6-35b-a3b",
-        api_key=os.environ["SUMMER_SCHOOL_LLM_KEY_B"],
-        base_url="http://82.202.156.206:8080/v1",
+        model=LLM_MODEL,
+        api_key=os.environ[LLM_API_KEY_ENV],
+        base_url=LLM_BASE_URL,
         temperature=1.0,
         max_tokens=4096,
         request_timeout=120,
@@ -81,9 +85,9 @@ def _make_code_llm() -> ChatOpenAI:
     ProblemConfig/guard classification response.
     """
     return ChatOpenAI(
-        model="qwen3.6-35b-a3b",
-        api_key=os.environ["SUMMER_SCHOOL_LLM_KEY_B"],
-        base_url="http://82.202.156.206:8080/v1",
+        model=LLM_MODEL,
+        api_key=os.environ[LLM_API_KEY_ENV],
+        base_url=LLM_BASE_URL,
         temperature=1.0,
         max_tokens=8192,
         request_timeout=180,
@@ -327,7 +331,7 @@ async def _run_job(job: Job) -> None:
             str(REPO / "run.py"),
             f"problem.name={job.problem_name}",
             f"max_mutants={MAX_MUTANTS}",
-            "llm=summer_school_servers",
+            f"llm={EVOLUTION_LLM_CONFIG}",
             f"redis.db={db}",
             "redis.resume=true",
             "+cost_monitor=enabled",

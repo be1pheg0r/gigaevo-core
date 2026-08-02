@@ -158,7 +158,7 @@ EVENT_CLASSES = {
 }
 
 
-def build_llm(group: str = "summer_school_servers"):
+def build_llm(group: str = "single"):
     """The real model pool, composed from the real config.
 
     Budget mode aside, this is what makes `--live-agent` cheap: the event
@@ -517,7 +517,7 @@ def main() -> None:
     )
     ap.add_argument(
         "--llm",
-        default="summer_school_servers",
+        default="single",
         help="model pool for --live-agent (a config/llm group name)",
     )
     ap.add_argument(

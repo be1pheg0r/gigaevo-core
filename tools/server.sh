@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run things on the summer-school server without hand-typing ssh.
+# Run things on a remote server without hand-typing ssh.
 #
 # Why this exists: `ssh host 'pkill -f cost_lab_web/app.py; ...'` looks fine and
 # is a trap. pkill matches against full command lines, and the ssh session's own
@@ -24,9 +24,12 @@
 # Auth: ~/.ssh/gigaevo_server (dedicated key). Override with GIGAEVO_SSH_KEY.
 set -uo pipefail
 
-HOST="${GIGAEVO_HOST:-User10@82.202.156.206}"
+: "${GIGAEVO_HOST:?Set GIGAEVO_HOST to user@host}"
+: "${GIGAEVO_BASE_URL:?Set GIGAEVO_BASE_URL to the public service URL}"
+HOST="$GIGAEVO_HOST"
 KEY="${GIGAEVO_SSH_KEY:-$HOME/.ssh/gigaevo_server}"
-BASE="${GIGAEVO_BASE_URL:-http://82.202.156.206:8080}"
+BASE="$GIGAEVO_BASE_URL"
+SECONDARY_LLM_BASE_URL="${GIGAEVO_SECONDARY_LLM_BASE_URL:-}"
 REPO_DIR="~/gigaevo-core"
 
 # service -> "script path|log file|url path"
@@ -60,7 +63,9 @@ cmd_status() {
   done
   printf '%-14s %s\n' "grafana"     "$(http_code "$BASE/grafana/")"
   printf '%-14s %s\n' "vllm-35b"    "$(http_code "$BASE/v1/models")"
-  printf '%-14s %s\n' "vllm-9b"     "$(http_code "http://82.202.157.243:8080/v1/models")"
+  if [ -n "$SECONDARY_LLM_BASE_URL" ]; then
+    printf '%-14s %s\n' "vllm-secondary" "$(http_code "$SECONDARY_LLM_BASE_URL/v1/models")"
+  fi
   echo "--- remote ---"
   ssh_run "cd $REPO_DIR && git log -1 --format='HEAD %h %s' && ps -o pid,etime,cmd -u \$USER | grep -E '[a]pp\.py' || echo 'no app.py running'"
 }

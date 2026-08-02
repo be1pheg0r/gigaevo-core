@@ -191,7 +191,7 @@ files are in `config/`:
 |-----------|---------|-----------|
 | `experiment/` | Complete experiment templates | `base.yaml`, `full_featured.yaml`, `migration_bus.yaml`, `multi_island_complexity.yaml`, `multi_llm_exploration.yaml`, `prompt_coevolution.yaml`, `steady_state_adversarial.yaml` |
 | `algorithm/` | Evolution algorithms | `single_island.yaml`, `single_island_2d.yaml`, `multi_island.yaml`, `topology_3d.yaml` |
-| `llm/` | LLM setups | `single.yaml`, `heterogeneous.yaml`, `heterogeneous_bandit.yaml`, `openrouter_bandit.yaml`, `openrouter_ensemble.yaml`, `summer_school_servers.yaml` / `summer_school_27b.yaml` (AIRI summer-school GPU servers — see `config/llm/summer_school_servers.yaml` for setup) |
+| `llm/` | LLM setups | `single.yaml`, `heterogeneous.yaml`, `heterogeneous_bandit.yaml`, `openrouter_bandit.yaml`, `openrouter_ensemble.yaml` |
 | `pipeline/` | DAG execution pipelines | `auto.yaml` (default), `standard.yaml`, `with_context.yaml`, `custom.yaml`, `prompt_evolution.yaml` |
 | `prompt_fetcher/` | Prompt sourcing | `fixed.yaml`, `coevolved.yaml` |
 | `stopper/` | Stopping criteria | `max_mutants.yaml` (default), `wall_clock.yaml`, `fitness_plateau.yaml` |

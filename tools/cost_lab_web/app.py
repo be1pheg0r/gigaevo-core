@@ -406,7 +406,7 @@ class NewExperiment(BaseModel):
     tasks: list[str] = Field(min_length=1)
     max_mutants: int = 100
     wave_size: int = 3
-    llm: str = "summer_school_servers"
+    llm: str = "single"
     label: str = ""
 
 
@@ -573,7 +573,7 @@ class BudgetProbe(BaseModel):
     task: str
     attempts: int = Field(default=100, ge=1, le=100_000)
     budget_tokens: int = Field(default=1_000_000, ge=1)
-    llm: str = "summer_school_servers"
+    llm: str = "single"
 
 
 @dataclass

@@ -7,25 +7,25 @@ probe size, reading logs, or stopping arbitrary processes. Every new measurement
 runs exactly ``PROBE_ATTEMPTS`` mutations for a curated task, with one probe
 allowed at a time.
 """
+
 from __future__ import annotations
 
 import asyncio
+from collections import deque
+from dataclasses import dataclass, field
 import json
 import os
+from pathlib import Path
 import secrets
 import subprocess
 import sys
 import time
-from collections import deque
-from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
-
 
 REPO = Path(__file__).resolve().parents[2]
 STATIC_DIR = Path(__file__).parent / "static"
@@ -35,9 +35,8 @@ sys.path.insert(0, str(REPO / "tools" / "cost_ablation"))
 from replay_from_log import hook_from_log  # noqa: E402
 from run_ablation import find_free_dbs, launch  # noqa: E402
 
-
 PORT = int(os.environ.get("TOKEN_PLAYGROUND_PORT", "8092"))
-LLM_CONFIG = os.environ.get("TOKEN_PLAYGROUND_LLM", "summer_school_servers")
+LLM_CONFIG = os.environ.get("TOKEN_PLAYGROUND_LLM", "single")
 
 # These are product safety limits, not user-configurable defaults.
 PROBE_ATTEMPTS = 10
@@ -176,7 +175,9 @@ _api_hits: dict[str, deque[float]] = {}
 def _client_ip(request: Request) -> str:
     # nginx must overwrite, not append, X-Forwarded-For (see README).
     forwarded = request.headers.get("x-forwarded-for", "")
-    return forwarded.split(",", 1)[0].strip() or (request.client.host if request.client else "unknown")
+    return forwarded.split(",", 1)[0].strip() or (
+        request.client.host if request.client else "unknown"
+    )
 
 
 def _problem_exists(task: str) -> bool:
@@ -236,7 +237,9 @@ def _projection(job: EstimateJob) -> dict[str, Any] | None:
     q75 = hook.project_tokens(job.attempts, alpha=0.5)[1][1]
     n_hi = hook.affordable_attempts(job.budget_tokens, hi=MAX_TARGET_ATTEMPTS)
     pessimism = max(q75 / point, 1.0)
-    n_lo = hook.affordable_attempts(job.budget_tokens / pessimism, hi=MAX_TARGET_ATTEMPTS)
+    n_lo = hook.affordable_attempts(
+        job.budget_tokens / pessimism, hi=MAX_TARGET_ATTEMPTS
+    )
     fits = hi <= job.budget_tokens
     answer = {
         "observed_attempts": int(hook._attempts),  # noqa: SLF001 - UI provenance
@@ -244,7 +247,9 @@ def _projection(job: EstimateJob) -> dict[str, Any] | None:
         "budget_tokens": job.budget_tokens,
         "predicted_tokens": round(point),
         "interval": [round(lo), round(hi)],
-        "verdict": "fits" if fits else ("tight" if point <= job.budget_tokens else "over"),
+        "verdict": "fits"
+        if fits
+        else ("tight" if point <= job.budget_tokens else "over"),
         "affordable_attempts": [min(n_lo, n_hi), max(n_lo, n_hi)],
     }
     job.answer_stamp = stamp
@@ -255,10 +260,14 @@ def _projection(job: EstimateJob) -> dict[str, Any] | None:
 def _prune_limits(now: float) -> None:
     while _starts_24h and now - _starts_24h[0] >= 24 * 60 * 60:
         _starts_24h.popleft()
-    stale_ips = [ip for ip, stamp in _ip_last_start.items() if now - stamp >= 24 * 60 * 60]
+    stale_ips = [
+        ip for ip, stamp in _ip_last_start.items() if now - stamp >= 24 * 60 * 60
+    ]
     for ip in stale_ips:
         _ip_last_start.pop(ip, None)
-    stale_jobs = [job_id for job_id, job in _jobs.items() if now - job.created_at >= JOB_TTL_S]
+    stale_jobs = [
+        job_id for job_id, job in _jobs.items() if now - job.created_at >= JOB_TTL_S
+    ]
     for job_id in stale_jobs:
         _jobs.pop(job_id, None)
 
@@ -286,7 +295,9 @@ async def public_safety_headers(request: Request, call_next):
         too_large = True
     if too_large:
         return JSONResponse({"detail": "request is too large"}, status_code=413)
-    if request.url.path.startswith("/api/") and not _api_rate_ok(_client_ip(request), time.time()):
+    if request.url.path.startswith("/api/") and not _api_rate_ok(
+        _client_ip(request), time.time()
+    ):
         return JSONResponse(
             {"detail": "Слишком много запросов. Попробуйте через минуту."},
             status_code=429,
@@ -307,7 +318,11 @@ async def public_safety_headers(request: Request, call_next):
 @app.get("/health")
 async def health() -> dict[str, Any]:
     _refresh_active()
-    return {"ok": True, "active_probes": 1 if _active else 0, "probe_attempts": PROBE_ATTEMPTS}
+    return {
+        "ok": True,
+        "active_probes": 1 if _active else 0,
+        "probe_attempts": PROBE_ATTEMPTS,
+    }
 
 
 @app.get("/api/catalog")
@@ -351,25 +366,33 @@ async def start_estimate(body: EstimateRequest, request: Request) -> dict[str, A
         if _active is not None and _active.task == body.task:
             probe = _active
         if probe is None and _active is not None:
-            raise HTTPException(429, "Сейчас идёт другая прикидка. Попробуйте через несколько минут.")
+            raise HTTPException(
+                429, "Сейчас идёт другая прикидка. Попробуйте через несколько минут."
+            )
 
         if probe is None:
             ip = _client_ip(request)
             last = _ip_last_start.get(ip, 0.0)
             if now - last < IP_COOLDOWN_S:
                 wait_s = round(IP_COOLDOWN_S - (now - last))
-                raise HTTPException(429, f"Для нового замера с этого адреса подождите {wait_s} с.")
+                raise HTTPException(
+                    429, f"Для нового замера с этого адреса подождите {wait_s} с."
+                )
             if len(_starts_24h) >= MAX_DAILY_PROBES:
                 raise HTTPException(429, "Дневной лимит новых замеров исчерпан.")
             try:
                 db = find_free_dbs(1)[0]
             except (RuntimeError, OSError) as exc:
-                raise HTTPException(503, "Нет свободного слота для короткой прикидки.") from exc
+                raise HTTPException(
+                    503, "Нет свободного слота для короткой прикидки."
+                ) from exc
 
             PROBE_DIR.mkdir(parents=True, exist_ok=True)
             run_id = secrets.token_hex(6)
             log = _probe_log_path(body.task, run_id)
-            process = launch(body.task, db, PROBE_ATTEMPTS, LLM_CONFIG, "agentless", log)
+            process = launch(
+                body.task, db, PROBE_ATTEMPTS, LLM_CONFIG, "agentless", log
+            )
             probe = ProbeRun(task=body.task, process=process, log=log, started_at=now)
             _active = probe
             _starts_24h.append(now)
@@ -387,7 +410,9 @@ async def start_estimate(body: EstimateRequest, request: Request) -> dict[str, A
         return {
             "job_id": job_id,
             "probe_attempts": PROBE_ATTEMPTS,
-            "source": "shared_probe" if probe is _active and probe.started_at < now else "new_probe",
+            "source": "shared_probe"
+            if probe is _active and probe.started_at < now
+            else "new_probe",
         }
 
 
@@ -420,11 +445,16 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
 def selftest() -> None:
-    post_paths = {route.path for route in app.routes if "POST" in getattr(route, "methods", set())}
+    post_paths = {
+        route.path for route in app.routes if "POST" in getattr(route, "methods", set())
+    }
     public_paths = {route.path for route in app.routes}
     assert post_paths == {"/api/estimate"}
     forbidden_segments = {"experiment", "experiments", "launch", "stop", "log", "logs"}
-    assert not any(forbidden_segments.intersection(path.strip("/").split("/")) for path in public_paths)
+    assert not any(
+        forbidden_segments.intersection(path.strip("/").split("/"))
+        for path in public_paths
+    )
     assert PROBE_ATTEMPTS == 10 and MAX_ACTIVE_PROBES == 1 and IP_COOLDOWN_S == 30
     assert TASK_CATALOG and all(_problem_exists(task) for task in TASK_CATALOG)
     alphaevolve_root = REPO / "problems" / "alphaevolve"
@@ -435,15 +465,29 @@ def selftest() -> None:
     }
     assert set(TASK_CATALOG) == discovered_tasks
     probe_log = _probe_log_path("alphaevolve/packing_circles/n_26", "abc123")
-    assert probe_log.parent == PROBE_DIR and probe_log.name == "probe_alphaevolve__packing_circles__n_26_abc123.log"
-    assert EstimateRequest(task="alphaevolve/packing_circles/n_26").attempts <= MAX_TARGET_ATTEMPTS
+    assert (
+        probe_log.parent == PROBE_DIR
+        and probe_log.name == "probe_alphaevolve__packing_circles__n_26_abc123.log"
+    )
+    assert (
+        EstimateRequest(task="alphaevolve/packing_circles/n_26").attempts
+        <= MAX_TARGET_ATTEMPTS
+    )
     try:
         EstimateRequest(task="x", attempts=MAX_TARGET_ATTEMPTS + 1)
     except ValueError:
         pass
     else:
         raise AssertionError("target-attempt cap is not enforced")
-    print(json.dumps({"ok": True, "post_routes": sorted(post_paths), "probe_attempts": PROBE_ATTEMPTS}))
+    print(
+        json.dumps(
+            {
+                "ok": True,
+                "post_routes": sorted(post_paths),
+                "probe_attempts": PROBE_ATTEMPTS,
+            }
+        )
+    )
 
 
 if __name__ == "__main__":
