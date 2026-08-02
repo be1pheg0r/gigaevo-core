@@ -46,6 +46,7 @@ MAX_BUDGET_TOKENS = 20_000_000
 MAX_ACTIVE_PROBES = 1
 MAX_DAILY_PROBES = 12
 IP_COOLDOWN_S = 30
+DISPLAY_INTERVAL_FRACTION = 0.03
 MAX_REQUEST_BYTES = 4_096
 MAX_JOBS = 500
 JOB_TTL_S = 60 * 60
@@ -231,9 +232,11 @@ def _projection(job: EstimateJob) -> dict[str, Any] | None:
     if job.answer is not None and job.answer_stamp == stamp:
         return job.answer
 
-    point, (lo, hi) = hook.project_tokens(job.attempts)
+    point, _model_interval = hook.project_tokens(job.attempts)
     if point <= 0:
         return None
+    lo = point * (1 - DISPLAY_INTERVAL_FRACTION)
+    hi = point * (1 + DISPLAY_INTERVAL_FRACTION)
     q75 = hook.project_tokens(job.attempts, alpha=0.5)[1][1]
     n_hi = hook.affordable_attempts(job.budget_tokens, hi=MAX_TARGET_ATTEMPTS)
     pessimism = max(q75 / point, 1.0)
@@ -456,6 +459,7 @@ def selftest() -> None:
         for path in public_paths
     )
     assert PROBE_ATTEMPTS == 10 and MAX_ACTIVE_PROBES == 1 and IP_COOLDOWN_S == 30
+    assert DISPLAY_INTERVAL_FRACTION == 0.03
     assert TASK_CATALOG and all(_problem_exists(task) for task in TASK_CATALOG)
     alphaevolve_root = REPO / "problems" / "alphaevolve"
     discovered_tasks = {

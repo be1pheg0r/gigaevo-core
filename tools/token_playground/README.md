@@ -17,6 +17,7 @@ Safety limits are intentionally constants in `app.py`:
 - 4 KiB request-body limit;
 - 180 API requests per IP per minute and at most 500 live result handles;
 - no reuse of completed measurements and `no-store` on every response;
+- displayed token interval is fixed at ±3% around the point estimate;
 - no experiment, log, stop, shell or generic launch routes.
 
 Run:
