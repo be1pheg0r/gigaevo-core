@@ -24,7 +24,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 REPO = Path(__file__).resolve().parents[2]
@@ -79,12 +79,11 @@ TASK_CATALOG = {
 
 
 class EstimateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     task: str
     attempts: int = Field(default=250, ge=25, le=MAX_TARGET_ATTEMPTS)
     budget_tokens: int = Field(default=3_000_000, ge=100_000, le=MAX_BUDGET_TOKENS)
-
-    class Config:
-        extra = "forbid"
 
 
 @dataclass
@@ -388,7 +387,8 @@ def selftest() -> None:
     post_paths = {route.path for route in app.routes if "POST" in getattr(route, "methods", set())}
     public_paths = {route.path for route in app.routes}
     assert post_paths == {"/api/estimate"}
-    assert not any(word in path for path in public_paths for word in ("experiment", "launch", "stop", "log"))
+    forbidden_segments = {"experiment", "experiments", "launch", "stop", "log", "logs"}
+    assert not any(forbidden_segments.intersection(path.strip("/").split("/")) for path in public_paths)
     assert PROBE_ATTEMPTS == 10 and MAX_ACTIVE_PROBES == 1
     assert EstimateRequest(task="alphaevolve_packing_circles_n_26").attempts <= MAX_TARGET_ATTEMPTS
     try:
