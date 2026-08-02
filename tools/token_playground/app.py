@@ -137,6 +137,11 @@ def _problem_exists(task: str) -> bool:
     return (problem / "validate.py").is_file() and (problem / "metrics.yaml").is_file()
 
 
+def _probe_log_path(task: str, run_id: str) -> Path:
+    task_slug = task.replace("/", "__").replace("\\", "__")
+    return PROBE_DIR / f"probe_{task_slug}_{run_id}.log"
+
+
 def _load_hook(probe: ProbeRun) -> Any | None:
     if probe.hook is not None:
         return probe.hook
@@ -332,7 +337,7 @@ async def start_estimate(body: EstimateRequest, request: Request) -> dict[str, A
 
             PROBE_DIR.mkdir(parents=True, exist_ok=True)
             run_id = secrets.token_hex(6)
-            log = PROBE_DIR / f"probe_{body.task}_{run_id}.log"
+            log = _probe_log_path(body.task, run_id)
             process = launch(body.task, db, PROBE_ATTEMPTS, LLM_CONFIG, "agentless", log)
             probe = ProbeRun(task=body.task, process=process, log=log, started_at=now)
             _active = probe
@@ -392,6 +397,8 @@ def selftest() -> None:
     assert not any(forbidden_segments.intersection(path.strip("/").split("/")) for path in public_paths)
     assert PROBE_ATTEMPTS == 10 and MAX_ACTIVE_PROBES == 1
     assert TASK_CATALOG and all(_problem_exists(task) for task in TASK_CATALOG)
+    probe_log = _probe_log_path("alphaevolve/packing_circles/n_26", "abc123")
+    assert probe_log.parent == PROBE_DIR and probe_log.name == "probe_alphaevolve__packing_circles__n_26_abc123.log"
     assert EstimateRequest(task="alphaevolve/packing_circles/n_26").attempts <= MAX_TARGET_ATTEMPTS
     try:
         EstimateRequest(task="x", attempts=MAX_TARGET_ATTEMPTS + 1)
