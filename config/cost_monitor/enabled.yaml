@@ -6,9 +6,8 @@
 # growth_rate. LLM telemetry is fed live via the in-process LLM_CALL
 # subscriber in gigaevo/monitoring/emit.py — no log tailing.
 #
-# Adjustments are logged as COST_AGENT_ADJUSTMENT canonical events
-# (mutant_index, cold/golden/growth, reasoning) for offline analysis, e.g.
-# tools/pipeline_15tasks/analyze_logs.py.
+# Adjustments are logged as COST_AGENT_ADJUSTMENT canonical events for
+# offline analysis.
 #
 # Not part of the `pipeline` group on purpose: it's orthogonal to
 # pipeline_builder choice. Enable additively on top of any experiment:

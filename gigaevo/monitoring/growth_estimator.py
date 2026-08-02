@@ -96,8 +96,7 @@ class RobustPowerLaw:
     OLS in log-log space is skewed by a single noisy point (e.g. a
     near-empty first call, common in this system's cold-start calls);
     Theil-Sen has a ~29% breakdown point and stays reliable through that.
-    Validated on real logs as the best of several token-count estimators
-    (tools/pipeline_15tasks/estimation_research).
+    Validated on real logs as the best of several token-count estimators.
     """
 
     a: float
@@ -141,7 +140,7 @@ def fit_ttft_tpot(
     over call index — latency correlates weakly with call order (r≈0.23
     on real logs) but moderately with tokens_out (r≈0.57), and any
     index-based curve fit is dominated by backpressure noise instead of a
-    real trend (tools/pipeline_15tasks/estimation_research).
+    real trend.
     """
     n = len(tokens_out)
     if n == 0:
