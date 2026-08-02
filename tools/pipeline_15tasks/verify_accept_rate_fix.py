@@ -4,10 +4,11 @@ at max_mutants=100 with +cost_monitor=enabled, after the fix to
 CostMonitorHook.total_units_by_stage (project by observed accept rate
 instead of treating max_mutants as the accepted-mutant count).
 """
+
+from pathlib import Path
 import subprocess
 import sys
 import time
-from pathlib import Path
 
 import redis
 
@@ -37,7 +38,8 @@ def main() -> None:
             print("flush error:", e)
 
         cmd = [
-            sys.executable, str(REPO / "run.py"),
+            sys.executable,
+            str(REPO / "run.py"),
             f"problem.name={task}",
             f"max_mutants={MAX_MUTANTS}",
             "llm=summer_school_servers",

@@ -22,13 +22,14 @@ known before building anything on top of it.
 Usage:
     python3 tools/cost_ablation/residual_features.py experiments/*/*noagent*.log
 """
+
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 import statistics as st
 import sys
 import tempfile
-from pathlib import Path
 
 import numpy as np
 from scipy import stats as sp_stats
@@ -38,11 +39,10 @@ sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from loguru import logger
-
 from replay_from_log import hook_from_log, replay_log  # noqa: E402
 
 GRID = (0.05, 0.10, 0.15, 0.20, 0.25, 0.35, 0.50)
-FOCUS = (0.10, 0.25)          # where a budget decision is actually taken
+FOCUS = (0.10, 0.25)  # where a budget decision is actually taken
 
 
 def truncate(path: Path, frac: float) -> Path | None:
@@ -77,19 +77,22 @@ def features(hook) -> dict[str, float]:
         "вызовов_на_попытку": len(hook._call_history) / max(hook._attempts, 1),
         "доля_не_LLM_времени": sum(nonllm) / (llm_total + sum(nonllm) or 1.0),
         "разброс_латентности": (max(lat) / med_lat) if med_lat else 0.0,
-        "кв_отклонение_латентности": (st.pstdev(lat) / med_lat) if med_lat and len(lat) > 1 else 0.0,
+        "кв_отклонение_латентности": (st.pstdev(lat) / med_lat)
+        if med_lat and len(lat) > 1
+        else 0.0,
         "медиана_токенов": st.median(tok) if tok else 0.0,
         "конкурентность": hook._concurrency,
         "конкурентность_к_капу": hook._concurrency / max(hook._pred.max_in_flight, 1),
         "доля_упавших_вызовов": sum(1 for r in hook._call_history if r.tokens_in == 0)
-                                / max(len(hook._call_history), 1),
+        / max(len(hook._call_history), 1),
     }
     return f
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("logs", nargs="+", type=Path)
     args = ap.parse_args()
     logger.remove()
@@ -113,7 +116,10 @@ def main() -> None:
             i = min(len(series) - 1, max(0, round(p * len(series)) - 1))
             pt = series[i]
             elapsed = pt.get("elapsed_s") or 0.0
-            pred_rest, real_rest = pt["predicted_duration_s"] - elapsed, actual - elapsed
+            pred_rest, real_rest = (
+                pt["predicted_duration_s"] - elapsed,
+                actual - elapsed,
+            )
             if pred_rest <= 1e-6 or real_rest <= 1e-6:
                 continue
             cut = truncate(path, p)
@@ -132,7 +138,9 @@ def main() -> None:
     print(f"\nразобрано логов: {len(set(f for v in fams.values() for f in v))}\n")
 
     print("=== множитель на остаток по прогрессу ===")
-    print(f"{'прогресс':>9} {'n':>4} {'медиана':>9} {'IQR':>16} {'|err| после константы':>22}")
+    print(
+        f"{'прогресс':>9} {'n':>4} {'медиана':>9} {'IQR':>16} {'|err| после константы':>22}"
+    )
     for p in GRID:
         ms = sorted(mult[p])
         if len(ms) < 4:
@@ -140,7 +148,9 @@ def main() -> None:
         k = st.median(ms)
         q1, q3 = ms[len(ms) // 4], ms[3 * len(ms) // 4]
         left = st.median([abs(1 - m / k) * 100 for m in ms])
-        print(f"{p:>9.0%} {len(ms):>4} {k:>9.2f} {f'[{q1:.2f}, {q3:.2f}]':>16} {left:>21.1f}%")
+        print(
+            f"{p:>9.0%} {len(ms):>4} {k:>9.2f} {f'[{q1:.2f}, {q3:.2f}]':>16} {left:>21.1f}%"
+        )
 
     print("\n=== чем предсказуем остаток (Spearman с множителем) ===")
     for p in FOCUS:
@@ -170,8 +180,10 @@ def main() -> None:
             within = st.median([max(v) / max(min(v), 1e-9) for v in rep.values()])
             allm = sorted(ms)
             across = allm[3 * len(allm) // 4] / max(allm[len(allm) // 4], 1e-9)
-            print(f"{'разброс внутри задачи':>28} x{within:.2f}   "
-                  f"между задачами x{across:.2f}   (задач с повторами: {len(rep)})")
+            print(
+                f"{'разброс внутри задачи':>28} x{within:.2f}   "
+                f"между задачами x{across:.2f}   (задач с повторами: {len(rep)})"
+            )
 
         # Does knowing WHICH task this is beat knowing nothing? Leave-one-out,
         # because a per-task median that includes the point it is scoring
@@ -188,10 +200,15 @@ def main() -> None:
                 n_task += 1
         if n_task >= 6:
             # compare on the same subset, else the two are not comparable
-            paired_glob = [g for g, f_ in zip(glob_err, fams[p])
-                           if sum(1 for x in fams[p] if x == f_) >= 3]
-            print(f"{'приор: общий':>28} {st.median(paired_glob):5.1f}%   "
-                  f"{'приор: по задаче':>20} {st.median(task_err):5.1f}%   (n={n_task})")
+            paired_glob = [
+                g
+                for g, f_ in zip(glob_err, fams[p])
+                if sum(1 for x in fams[p] if x == f_) >= 3
+            ]
+            print(
+                f"{'приор: общий':>28} {st.median(paired_glob):5.1f}%   "
+                f"{'приор: по задаче':>20} {st.median(task_err):5.1f}%   (n={n_task})"
+            )
 
 
 if __name__ == "__main__":

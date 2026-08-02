@@ -1,14 +1,4 @@
-"""Tests for cost/time tracking and LLM_CALL emission in the chain-eval LLMClient.
-
-`problems/chains/client.py::LLMClient` is the second LLM client every chain
-`validate.py` spins up (chain-eval / validation calls) — previously its
-calls left no trace in `[LLM_CALL]` logs at all, only in an in-process
-`call_logs` list nobody read. Each call now also records `duration_ms`/
-`model`/`ok`/`error_type` and emits a `[LLM_CALL]` line via
-`emit_llm_call_from_subprocess`, which is how the data escapes the
-`CallValidatorFunction` subprocess boundary (see
-`gigaevo.monitoring.subprocess_emit`).
-"""
+"""Test cost telemetry emitted by the chain-evaluation LLM client."""
 
 from __future__ import annotations
 
@@ -56,7 +46,9 @@ class TestSuccessfulCall:
     async def test_records_call_log_with_timing_and_emits_llm_call(
         self, _log_file_env
     ) -> None:
-        client = LLMClient(model="Qwen/Qwen3-8B", client_kwargs={"base_url": "http://x/v1"})
+        client = LLMClient(
+            model="Qwen/Qwen3-8B", client_kwargs={"base_url": "http://x/v1"}
+        )
         client.client.chat.completions.create = AsyncMock(
             return_value=_fake_response(10, 20, "hello")
         )
@@ -88,7 +80,9 @@ class TestFailingCall:
     async def test_retries_and_emits_one_llm_call_per_attempt(
         self, _log_file_env
     ) -> None:
-        client = LLMClient(model="Qwen/Qwen3-8B", client_kwargs={"base_url": "http://x/v1"})
+        client = LLMClient(
+            model="Qwen/Qwen3-8B", client_kwargs={"base_url": "http://x/v1"}
+        )
         client.client.chat.completions.create = AsyncMock(
             side_effect=RuntimeError("boom")
         )

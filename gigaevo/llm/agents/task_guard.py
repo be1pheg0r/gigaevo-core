@@ -59,7 +59,9 @@ class RequestClassification(BaseModel):
             "restricted category, purely descriptive."
         ),
     )
-    reason: str = Field(description="One-sentence explanation of the decision, for the user.")
+    reason: str = Field(
+        description="One-sentence explanation of the decision, for the user."
+    )
 
     @field_validator("prohibited_category")
     @classmethod

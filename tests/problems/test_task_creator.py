@@ -34,8 +34,11 @@ def _valid_config(name: str = "sort_faster") -> ProblemConfig:
         validation=FunctionSignature(params=[ParameterSpec(name="solution")]),
         metrics={
             "fitness": MetricSpec(
-                description="speed", is_primary=True, higher_is_better=True,
-                lower_bound=0.0, upper_bound=1.0,
+                description="speed",
+                is_primary=True,
+                higher_is_better=True,
+                lower_bound=0.0,
+                upper_bound=1.0,
             )
         },
         task_description=TaskDescription(objective="Sort faster than baseline"),
@@ -136,10 +139,14 @@ class TestCreateTaskFromRequestAccepted:
         assert (result.problem_dir / "task_description.txt").exists()
         assert (result.problem_dir / "metrics.yaml").exists()
         assert (result.problem_dir / "validate.py").exists()
-        builder.arun.assert_awaited_once_with("evolve a faster sorting algorithm", "algorithm_speed")
+        builder.arun.assert_awaited_once_with(
+            "evolve a faster sorting algorithm", "algorithm_speed"
+        )
 
     @pytest.mark.asyncio
-    async def test_unsafe_generated_name_raises_before_scaffolding(self, tmp_path: Path):
+    async def test_unsafe_generated_name_raises_before_scaffolding(
+        self, tmp_path: Path
+    ):
         guard = AsyncMock()
         guard.arun.return_value = RequestClassification(
             is_task_request=True, prohibited=False, reason="ok"

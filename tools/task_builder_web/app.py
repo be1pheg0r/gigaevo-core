@@ -104,7 +104,15 @@ class MutantPoint:
     actual_tokens_so_far: int
 
 
-STAGES = ["guarding", "building", "scaffolding", "writing_code", "seeding", "estimating", "done"]
+STAGES = [
+    "guarding",
+    "building",
+    "scaffolding",
+    "writing_code",
+    "seeding",
+    "estimating",
+    "done",
+]
 
 
 @dataclass
@@ -230,9 +238,15 @@ async def _write_real_code(config, target_dir: Path) -> None:
     if config.add_context:
         context_path = target_dir / "context.py"
         stub = context_path.read_text(encoding="utf-8")
-        fields_desc = "\n".join(
-            f"- {k}: {v}" for k, v in (config.context_spec.fields if config.context_spec else {}).items()
-        ) or "(no field breakdown given -- use your judgement from the docstring)"
+        fields_desc = (
+            "\n".join(
+                f"- {k}: {v}"
+                for k, v in (
+                    config.context_spec.fields if config.context_spec else {}
+                ).items()
+            )
+            or "(no field breakdown given -- use your judgement from the docstring)"
+        )
         code = await writer.arun(
             problem_name=config.name,
             task_description=task_description,
@@ -309,7 +323,8 @@ async def _run_job(job: Job) -> None:
 
         log_path = LOGS_DIR / f"{job.id}.log"
         cmd = [
-            sys.executable, str(REPO / "run.py"),
+            sys.executable,
+            str(REPO / "run.py"),
             f"problem.name={job.problem_name}",
             f"max_mutants={MAX_MUTANTS}",
             "llm=summer_school_servers",
@@ -385,7 +400,9 @@ async def download_problem(job_id: str) -> FileResponse:
     if job is None or not job.problem_dir:
         raise HTTPException(404, "no scaffolded problem for this job")
     archive_base = LOGS_DIR / f"{job_id}_problem"
-    archive_path = shutil.make_archive(str(archive_base), "zip", root_dir=job.problem_dir)
+    archive_path = shutil.make_archive(
+        str(archive_base), "zip", root_dir=job.problem_dir
+    )
     return FileResponse(archive_path, filename=f"{job.problem_name}.zip")
 
 

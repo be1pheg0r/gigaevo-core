@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import ClassVar
-
 import statistics
-
+from typing import ClassVar
 
 # ── Constants (validated on 4 benchmarks) ─────────────────────
 COLD_START_FACTOR = 0.57
@@ -33,12 +31,18 @@ def _prediction_interval(values: list[float]) -> tuple[float, float]:
 
 
 def _ramped_golden(steps: int) -> float:
-    return 1.0 + (GOLDEN_RATIO_MAX - 1.0) * min(steps, GOLDEN_RATIO_RAMP_STEPS) / GOLDEN_RATIO_RAMP_STEPS
+    return (
+        1.0
+        + (GOLDEN_RATIO_MAX - 1.0)
+        * min(steps, GOLDEN_RATIO_RAMP_STEPS)
+        / GOLDEN_RATIO_RAMP_STEPS
+    )
 
 
 # --------------------------------------------------------------------------- #
 # Data classes
 # --------------------------------------------------------------------------- #
+
 
 @dataclass
 class DagTopology:
@@ -47,34 +51,68 @@ class DagTopology:
     non_llm_stages: set[str] = field(default_factory=set)
     seq_depth: int = 1
     fanout_depth: int = 1
-    _BOTTLENECK_STAGES: ClassVar[set[str]] = {"CallProgramFunction", "CallValidatorFunction", "IntraMemoryStage"}
+    _BOTTLENECK_STAGES: ClassVar[set[str]] = {
+        "CallProgramFunction",
+        "CallValidatorFunction",
+        "IntraMemoryStage",
+    }
 
     @property
     def is_chain_task(self) -> bool:
-        return any(kw in s.lower() for s in self.stage_names for kw in {"chain", "prompt", "eval"})
+        return any(
+            kw in s.lower()
+            for s in self.stage_names
+            for kw in {"chain", "prompt", "eval"}
+        )
 
     @classmethod
     def from_stage_names(cls, stage_names: list[str]) -> DagTopology:
-        known_llm = {"MutationSuggestionStage", "MutationAgent", "LineageStage", "InsightsStage"}
+        known_llm = {
+            "MutationSuggestionStage",
+            "MutationAgent",
+            "LineageStage",
+            "InsightsStage",
+        }
         llm_s = {s for s in stage_names if s in known_llm}
         known_non_llm = {
-            "ComputeComplexityStage", "ValidateCodeStage", "CallProgramFunction",
-            "CallValidatorFunction", "FetchMetrics", "MergeMetricsStage",
-            "EnsureMetricsStage", "MutationContextStage", "DescendantProgramIds",
-            "AncestorProgramIds", "EvolutionaryStatisticsCollector",
-            "MemoryContextStage", "LineagesFromAncestors", "LineagesToDescendants",
-            "IntraMemoryStage", "ArchivePotentialGateStage", "FetchArtifact", "FormatterStage",
+            "ComputeComplexityStage",
+            "ValidateCodeStage",
+            "CallProgramFunction",
+            "CallValidatorFunction",
+            "FetchMetrics",
+            "MergeMetricsStage",
+            "EnsureMetricsStage",
+            "MutationContextStage",
+            "DescendantProgramIds",
+            "AncestorProgramIds",
+            "EvolutionaryStatisticsCollector",
+            "MemoryContextStage",
+            "LineagesFromAncestors",
+            "LineagesToDescendants",
+            "IntraMemoryStage",
+            "ArchivePotentialGateStage",
+            "FetchArtifact",
+            "FormatterStage",
         }
         non_llm_s = {s for s in stage_names if s in known_non_llm and s not in llm_s}
         seq_parts = [
-            "ComputeComplexityStage", "ValidateCodeStage", "CallProgramFunction",
-            "CallValidatorFunction", "FetchMetrics", "MergeMetricsStage",
-            "EnsureMetricsStage", "MutationContextStage", "MutationSuggestionStage",
+            "ComputeComplexityStage",
+            "ValidateCodeStage",
+            "CallProgramFunction",
+            "CallValidatorFunction",
+            "FetchMetrics",
+            "MergeMetricsStage",
+            "EnsureMetricsStage",
+            "MutationContextStage",
+            "MutationSuggestionStage",
         ]
         seq_depth = sum(1 for s in seq_parts if s in stage_names)
         return cls(
-            stage_names=stage_names, llm_stages=llm_s, non_llm_stages=non_llm_s,
-            seq_depth=max(seq_depth, 1), fanout_depth=len(stage_names),
+            stage_names=stage_names,
+            llm_stages=llm_s,
+            non_llm_stages=non_llm_s,
+            seq_depth=max(seq_depth, 1),
+            fanout_depth=len(stage_names),
         )
 
     @property
@@ -129,11 +167,16 @@ class StageExecSummary:
 
     @property
     def call_program_avg_ms(self) -> float:
-        return statistics.mean(self.stage_durations.get("CallProgramFunction", [])) or 0.0
+        return (
+            statistics.mean(self.stage_durations.get("CallProgramFunction", [])) or 0.0
+        )
 
     @property
     def call_validator_avg_ms(self) -> float:
-        return statistics.mean(self.stage_durations.get("CallValidatorFunction", [])) or 0.0
+        return (
+            statistics.mean(self.stage_durations.get("CallValidatorFunction", []))
+            or 0.0
+        )
 
     @property
     def intra_memory_avg_ms(self) -> float:
@@ -215,6 +258,7 @@ class CostPrediction:
 # Layer 1: Static baseline
 # --------------------------------------------------------------------------- #
 
+
 def compute_static_baseline(
     *,
     dag: DagTopology,
@@ -236,8 +280,10 @@ def compute_static_baseline(
     bottleneck_adj = 1.3 if dag.has_bottleneck else 1.0
     chain_adj = 1.5 if dag.is_chain_task else 1.0
 
-    per_mutation = avg_duration_per_call * calls_per_mutation * (
-        complexity_factor * depth_factor * growth_adj * bottleneck_adj * chain_adj
+    per_mutation = (
+        avg_duration_per_call
+        * calls_per_mutation
+        * (complexity_factor * depth_factor * growth_adj * bottleneck_adj * chain_adj)
     )
     predicted = max_mutants * per_mutation / max(1, max_in_flight)
 
@@ -245,23 +291,31 @@ def compute_static_baseline(
     cold_start_tokens = int(base_tokens_per_call * COLD_START_FACTOR)
 
     return CostPrediction(
-        dag_topology=dag, prompt_tokens=prompt_tokens, code_length=code_length,
-        complexity_score=complexity_score, llm_growth_rate=llm_growth_rate,
-        bottleneck_hint=bottleneck_hint, max_mutants=max_mutants, max_in_flight=max_in_flight,
+        dag_topology=dag,
+        prompt_tokens=prompt_tokens,
+        code_length=code_length,
+        complexity_score=complexity_score,
+        llm_growth_rate=llm_growth_rate,
+        bottleneck_hint=bottleneck_hint,
+        max_mutants=max_mutants,
+        max_in_flight=max_in_flight,
         predicted_duration_s=predicted,
         predicted_llm_calls=int(max_mutants * calls_per_mutation),
         predicted_total_tokens=int(
-            WARMUP_CALLS * cold_start_tokens +
-            (max_mutants * calls_per_mutation - WARMUP_CALLS) * base_tokens_per_call
+            WARMUP_CALLS * cold_start_tokens
+            + (max_mutants * calls_per_mutation - WARMUP_CALLS) * base_tokens_per_call
         ),
-        ci_low_s=predicted * 0.6, ci_high_s=predicted * 1.5,
-        token_ci_low=int(predicted * 0.7), token_ci_high=int(predicted * 1.3),
+        ci_low_s=predicted * 0.6,
+        ci_high_s=predicted * 1.5,
+        token_ci_low=int(predicted * 0.7),
+        token_ci_high=int(predicted * 1.3),
     )
 
 
 # --------------------------------------------------------------------------- #
 # Layer 2: Live calibration
 # --------------------------------------------------------------------------- #
+
 
 def calibrate_prediction(
     pred: CostPrediction,
@@ -321,19 +375,27 @@ def calibrate_prediction(
         # Apply LLM agent overrides
         if 0.5 <= pred.llm_golden_override <= 2.0:
             golden = pred.llm_golden_override
-        extra_growth = pred.llm_growth_override if 0.3 <= pred.llm_growth_override <= 3.0 else 1.0
+        extra_growth = (
+            pred.llm_growth_override if 0.3 <= pred.llm_growth_override <= 3.0 else 1.0
+        )
 
-        new_duration = real_throughput * pred.max_mutants * bp_adj * golden * extra_growth
+        new_duration = (
+            real_throughput * pred.max_mutants * bp_adj * golden * extra_growth
+        )
 
         if llm_summary.tokens_per_call and len(llm_summary.tokens_per_call) >= 3:
             rate = _robust_rate([float(t) for t in llm_summary.tokens_per_call])
-            lo, hi = _prediction_interval([float(t) for t in llm_summary.tokens_per_call])
+            lo, hi = _prediction_interval(
+                [float(t) for t in llm_summary.tokens_per_call]
+            )
             pred.predicted_total_tokens = int(rate * pred.predicted_llm_calls)
             pred.token_ci_low = int(lo * pred.predicted_llm_calls)
             pred.token_ci_high = int(hi * pred.predicted_llm_calls)
 
         if llm_summary.success_rate > 0:
-            pred.predicted_llm_calls = int(pred.predicted_llm_calls * llm_summary.success_rate)
+            pred.predicted_llm_calls = int(
+                pred.predicted_llm_calls * llm_summary.success_rate
+            )
 
         pred.predicted_duration_s = new_duration
         pred.ci_low_s = new_duration * 0.7
@@ -350,7 +412,9 @@ def calibrate_prediction(
         if pred.calibration_completed:
             rate = pred.predicted_duration_s / max(pred.max_mutants, 1)
             extra = pred.max_mutants - pred.calibration_mutants_done
-            pred.predicted_duration_s = pred.wall_time_at_calibration + rate * golden * extra
+            pred.predicted_duration_s = (
+                pred.wall_time_at_calibration + rate * golden * extra
+            )
 
     return pred
 
@@ -358,6 +422,7 @@ def calibrate_prediction(
 # --------------------------------------------------------------------------- #
 # Exponential smoothing
 # --------------------------------------------------------------------------- #
+
 
 def exponential_smoothing_estimate(
     predictions: list[CostPrediction],
@@ -371,7 +436,9 @@ def exponential_smoothing_estimate(
     if not last.is_ready:
         return None
     current_throughput = current_mutants_done / max(current_wall_s, 0.1)
-    prev_throughput = last.calibration_mutants_done / max(last.wall_time_at_calibration, 0.1)
+    prev_throughput = last.calibration_mutants_done / max(
+        last.wall_time_at_calibration, 0.1
+    )
     smoothed = alpha * current_throughput + (1 - alpha) * prev_throughput
     remaining = last.max_mutants - last.calibration_mutants_done
     golden = _ramped_golden(min(remaining, GOLDEN_RATIO_RAMP_STEPS))
@@ -379,19 +446,27 @@ def exponential_smoothing_estimate(
         golden = last.llm_golden_override
     additional_duration = remaining / max(smoothed, 0.001) * golden
     result = CostPrediction(
-        dag_topology=last.dag_topology, prompt_tokens=last.prompt_tokens,
-        code_length=last.code_length, complexity_score=last.complexity_score,
-        llm_growth_rate=last.llm_growth_rate, bottleneck_hint=last.bottleneck_hint,
-        max_mutants=last.max_mutants, max_in_flight=last.max_in_flight,
+        dag_topology=last.dag_topology,
+        prompt_tokens=last.prompt_tokens,
+        code_length=last.code_length,
+        complexity_score=last.complexity_score,
+        llm_growth_rate=last.llm_growth_rate,
+        bottleneck_hint=last.bottleneck_hint,
+        max_mutants=last.max_mutants,
+        max_in_flight=last.max_in_flight,
         predicted_duration_s=last.wall_time_at_calibration + additional_duration,
         predicted_llm_calls=last.predicted_llm_calls,
         predicted_total_tokens=last.predicted_total_tokens,
         ci_low_s=(last.wall_time_at_calibration + additional_duration) * 0.8,
         ci_high_s=(last.wall_time_at_calibration + additional_duration) * 1.2,
-        token_ci_low=last.token_ci_low, token_ci_high=last.token_ci_high,
-        llm_cold_override=last.llm_cold_override, llm_golden_override=last.llm_golden_override,
-        llm_growth_override=last.llm_growth_override, llm_outlier_indices=last.llm_outlier_indices,
-        llm_skip_next_calib=last.llm_skip_next_calib, llm_reasoning=last.llm_reasoning,
+        token_ci_low=last.token_ci_low,
+        token_ci_high=last.token_ci_high,
+        llm_cold_override=last.llm_cold_override,
+        llm_golden_override=last.llm_golden_override,
+        llm_growth_override=last.llm_growth_override,
+        llm_outlier_indices=last.llm_outlier_indices,
+        llm_skip_next_calib=last.llm_skip_next_calib,
+        llm_reasoning=last.llm_reasoning,
     )
     result.calibration_completed = True
     result.calibration_mutants_done = current_mutants_done

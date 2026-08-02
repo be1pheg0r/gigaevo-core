@@ -1,37 +1,15 @@
-"""CostMonitorAgent — LLM-powered cost model adjuster.
+"""CostMonitorAgent — LLM-powered cost model adjuster."""
 
-Woken by CostMonitorHook when the live estimate breaches the confidence
-interval its own previous estimate published, or when token progress and
-clock progress disagree. Names the CAUSE of the deviation (servers /
-programs / task / noise); each cause drives exactly one lever, which
-CostMonitorHook then gates, clamps and damps as before.
-
-Tool set
---------
-get_recent_calls(n)          — last N LLM_CALL records (tokens, latency, stage)
-get_program_diff(program_id) — diff of the mutated program vs its parent
-get_backpressure()           — current pipeline backpressure snapshot
-get_model_params()           — current cost model state (cold_factor, golden, …)
-get_progress()               — attempts, measured elapsed vs predicted remaining
-get_trigger()                — why this call was woken up
-get_last_adjustment_outcome()— previous decision and what the estimate did since
-adjust_model(params)         — apply corrections to the live cost model
-
-"""
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
-from dataclasses import dataclass, field
-from datetime import UTC, datetime
-from typing import Any, ClassVar, TypedDict
+from typing import Any, TypedDict
 
-from langchain_core.messages import BaseMessage, SystemMessage, HumanMessage
+from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 from gigaevo.llm.agents.base import LangGraphAgent
-
-
-# ── System prompt ──────────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = (
     "You are a **Cost Monitor Agent** for an evolutionary code optimisation "
@@ -100,8 +78,6 @@ SYSTEM_PROMPT = (
 )
 
 
-# ── Input / Output schemas ─────────────────────────────────────────────────
-
 @dataclass
 class LlmCallRecord:
     index: int
@@ -117,31 +93,27 @@ class LlmCallRecord:
         )
 
 
-# Which lever each cause is allowed to move. The agent names a cause, not a
-# lever: naming the lever was a free choice over three multipliers plus an
-# outlier list, and the model spent 18 of 20 wakeups on the outlier list —
-# the one action measured to make the forecast worse. A cause has exactly one
-# lever, so a wrong answer is a wrong DIAGNOSIS, which is inspectable, rather
-# than an arbitrary nudge that is not.
+# Each diagnosis controls exactly one model lever.
 CAUSE_LEVER = {
-    "servers": "concurrency_mult",     # the only lever on the divisor
-    "programs": "growth_rate_mult",    # remaining work grows faster than fitted
-    "task": "golden_ratio",            # flat margin on remaining work
-    "noise": None,                     # no lever; the correct answer most times
+    "servers": "concurrency_mult",  # the only lever on the divisor
+    "programs": "growth_rate_mult",  # remaining work grows faster than fitted
+    "task": "golden_ratio",  # flat margin on remaining work
+    "noise": None,  # no lever; the correct answer most times
 }
-# Causes whose lever applies to everything still ahead, so they must be backed
-# by a persistence claim. A server contention change is immediate and is not.
+# These levers affect all remaining work and require sustained evidence.
 BLUNT_CAUSES = frozenset({"programs", "task"})
 
 
 class _AdjustmentOutput(BaseModel):
     cause: str = Field(default="noise", description="servers | programs | task | noise")
-    magnitude: float = Field(default=-1.0, description="Multiplier for the cause's lever (−1 = no change)")
-    sustained_over_calls: int = Field(default=0, description="Calls the deviation held for; <5 refuses programs/task")
+    magnitude: float = Field(
+        default=-1.0, description="Multiplier for the cause's lever (−1 = no change)"
+    )
+    sustained_over_calls: int = Field(
+        default=0, description="Calls the deviation held for; <5 refuses programs/task"
+    )
     reasoning: str = Field(default="")
 
-
-# ── Tool implementations (reuse gigaevo-core infrastructure) ────────────────
 
 class _ToolSet:
     """In-memory tools used during a single agent call."""
@@ -193,7 +165,6 @@ class _ToolSet:
         self._miscov = miscoverage_rate
         self._miscov_target = miscoverage_target
         self._width_scale = width_scale
-        # Accumulated adjustments
         self.adjustments: dict[str, Any] = {}
 
     def get_calibration(self) -> str:
@@ -205,10 +176,13 @@ class _ToolSet:
         """
         if self._miscov is None:
             return "(no calibration history yet)"
-        state = ("about right" if abs(self._miscov - self._miscov_target) < 0.05
-                 else "too often — the interval has been too narrow"
-                 if self._miscov > self._miscov_target
-                 else "rarely — the interval has been generous")
+        state = (
+            "about right"
+            if abs(self._miscov - self._miscov_target) < 0.05
+            else "too often — the interval has been too narrow"
+            if self._miscov > self._miscov_target
+            else "rarely — the interval has been generous"
+        )
         return (
             f"the estimate has landed outside its own previous interval "
             f"{self._miscov:.0%} of the time (target {self._miscov_target:.0%}): {state}. "
@@ -217,19 +191,8 @@ class _ToolSet:
             f"something changed."
         )
 
-    # ── Observability tools ────────────────────────────────────────────────
-
     def get_recent_calls(self, n: int = 10) -> str:
-        """Return the last N LLM calls as a compact table.
-
-        Outliers are marked on LATENCY, not tokens. Measured across the
-        alphaevolve runs, token max/median per call is 1.6-2.5x — under the
-        2.5x threshold the marker used, so it essentially never fired and the
-        model was left recomputing spikes by hand off the ``lat=`` column.
-        Latency max/median is 11-27x, which is where the spikes actually are.
-        Already-flagged calls are labelled so a wakeup is not spent
-        rediscovering a spike that has already been winsorised.
-        """
+        """Return recent calls and mark latency outliers and prior flags."""
         calls = self._calls[-n:]
         if not calls:
             return "(no LLM calls yet)"
@@ -244,7 +207,9 @@ class _ToolSet:
             else:
                 marker = ""
             lines.append(c.to_line() + marker)
-        lines.append(f"Median latency: {median_lat:.0f}ms · median tokens: {median_tok:.0f}")
+        lines.append(
+            f"Median latency: {median_lat:.0f}ms · median tokens: {median_tok:.0f}"
+        )
         if self._flagged:
             lines.append(f"Already flagged this run: {sorted(self._flagged)}")
         return "\n".join(lines)
@@ -294,19 +259,23 @@ class _ToolSet:
         promised = a["predicted_duration_s"] - a["elapsed_s"]
         spent = self._elapsed - a["elapsed_s"]
         attempts_since = self._attempts - a["attempt"]
-        moved = [f"{k}={a[k]:.2f}" for k in ("golden", "growth", "concurrency") if a[k] > 0]
+        moved = [
+            f"{k}={a[k]:.2f}" for k in ("golden", "growth", "concurrency") if a[k] > 0
+        ]
         drift = ""
         if promised > 1 and self._pred_duration > 0:
-            delta = (self._pred_duration - a["predicted_duration_s"]) / a["predicted_duration_s"]
-            drift = (f"; since then the estimate moved {delta:+.0%} "
-                     f"({a['predicted_duration_s']:.0f}s -> {self._pred_duration:.0f}s)")
+            delta = (self._pred_duration - a["predicted_duration_s"]) / a[
+                "predicted_duration_s"
+            ]
+            drift = (
+                f"; since then the estimate moved {delta:+.0%} "
+                f"({a['predicted_duration_s']:.0f}s -> {self._pred_duration:.0f}s)"
+            )
         return (
             f"At attempt {a['attempt']} you set {', '.join(moved) or 'nothing'}"
             f" and flagged {a['outliers']} outlier(s); reason: {a['reasoning'] or '(none)'}. "
             f"{attempts_since} attempts and {spent:.0f}s have passed{drift}."
         )
-
-    # ── Action tools — accumulate adjustments ──────────────────────────────
 
     def adjust_model(
         self,
@@ -326,7 +295,8 @@ class _ToolSet:
             self.adjustments["concurrency_mult"] = concurrency_mult
             changes.append(f"concurrency×={concurrency_mult:.2f}")
         return (
-            f"Adjusted: {', '.join(changes)}" if changes
+            f"Adjusted: {', '.join(changes)}"
+            if changes
             else "No adjustments made (values out of range)"
         )
 
@@ -348,8 +318,6 @@ def _median(lst: list[int | float]) -> float:
     return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2
 
 
-# ── Tool schema for the LLM prompt ──────────────────────────────────────────
-
 TOOL_SCHEMA = """Available tools — call via tool name with arguments:
 
 get_recent_calls(n=10) → table of last N LLM calls
@@ -367,8 +335,6 @@ flag_as_outlier(index=3)
 skip_next_calibration()
 """
 
-
-# ── Agent ───────────────────────────────────────────────────────────────────
 
 class CostMonitorState(TypedDict, total=False):
     messages: list[BaseMessage]
@@ -408,16 +374,7 @@ class CostMonitorAgent(LangGraphAgent):
         return await self.graph.ainvoke(state or {"messages": []})
 
     def build_prompt(self, state: dict[str, Any]) -> list[BaseMessage]:
-        """Inline every tool's output into the prompt.
-
-        The tools are not callable by the model — whatever is not written here
-        the agent never sees. ``get_trigger``, ``get_progress`` and
-        ``get_last_adjustment_outcome`` used to be omitted while the system
-        prompt told the agent to consult them, so it decided without knowing
-        why it was woken, how far along the run was, or whether its previous
-        correction had helped. Ordered from the question ("why am I awake")
-        through the evidence to the levers.
-        """
+        """Inline the non-callable tool outputs into the model prompt."""
         tools = self._tools
 
         context = (
@@ -431,16 +388,18 @@ class CostMonitorAgent(LangGraphAgent):
             f"PROGRAM DIFF\n{(tools.get_program_diff() or '(none)')[:2000]}"
         )
 
-        user = HumanMessage(content=(
-            f"{context}\n\n"
-            "Name the CAUSE behind the trigger above. Respond with a JSON "
-            "object:\n"
-            '{"cause": "servers" | "programs" | "task" | "noise", '
-            '"magnitude": float, "sustained_over_calls": int, '
-            '"reasoning": "..."}\n\n'
-            '"noise" with magnitude -1 changes nothing and is a valid, common '
-            "and often correct answer — say why in `reasoning`."
-        ))
+        user = HumanMessage(
+            content=(
+                f"{context}\n\n"
+                "Name the CAUSE behind the trigger above. Respond with a JSON "
+                "object:\n"
+                '{"cause": "servers" | "programs" | "task" | "noise", '
+                '"magnitude": float, "sustained_over_calls": int, '
+                '"reasoning": "..."}\n\n'
+                '"noise" with magnitude -1 changes nothing and is a valid, common '
+                "and often correct answer — say why in `reasoning`."
+            )
+        )
         return [SystemMessage(content=SYSTEM_PROMPT), user]
 
     def parse_response(self, state: dict[str, Any]) -> dict[str, Any]:
@@ -451,7 +410,6 @@ class CostMonitorAgent(LangGraphAgent):
 
         content = getattr(response, "content", "")
         try:
-            # Strip code fences if present
             text = content.strip()
             if text.startswith("```"):
                 text = text.split("\n", 1)[1].rsplit("```", 1)[0]
@@ -459,10 +417,7 @@ class CostMonitorAgent(LangGraphAgent):
         except (json.JSONDecodeError, Exception):
             return state
 
-        # One cause in, one lever out. Everything downstream (the deadband,
-        # the step clamp, the reversal damping, the persistence gate) is the
-        # hook's existing machinery and is reached through the same keys as
-        # before — only the way the lever gets CHOSEN has changed.
+        # Map the diagnosis to its sole permitted lever.
         tools = self._tools
         cause = str(data.get("cause", "noise")).strip().lower()
         if cause not in CAUSE_LEVER:
@@ -473,18 +428,20 @@ class CostMonitorAgent(LangGraphAgent):
             magnitude = -1.0
         reasoning = data.get("reasoning", "")
 
-        levers = {"golden_ratio": -1.0, "growth_rate_mult": -1.0, "concurrency_mult": -1.0}
+        levers = {
+            "golden_ratio": -1.0,
+            "growth_rate_mult": -1.0,
+            "concurrency_mult": -1.0,
+        }
         lever = CAUSE_LEVER[cause]
         if lever is not None and magnitude > 0:
             levers[lever] = magnitude
 
-        tools.adjust_model(golden_ratio=levers["golden_ratio"],
-                           growth_rate_mult=levers["growth_rate_mult"],
-                           concurrency_mult=levers["concurrency_mult"])
-        skip = False
-        golden, growth, conc = (levers["golden_ratio"], levers["growth_rate_mult"],
-                                levers["concurrency_mult"])
-        outliers: list[int] = []
+        tools.adjust_model(
+            golden_ratio=levers["golden_ratio"],
+            growth_rate_mult=levers["growth_rate_mult"],
+            concurrency_mult=levers["concurrency_mult"],
+        )
 
         state["cost_adjustments"] = {
             "cause": cause,
@@ -498,7 +455,6 @@ class CostMonitorAgent(LangGraphAgent):
         }
         return state
 
-# ── No-op agent for ablation studies ────────────────────────────────────────
 
 class _DummyResponse:
     """Minimal stand-in for an AIMessage — only `.content` is read downstream."""

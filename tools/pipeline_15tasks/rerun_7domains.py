@@ -1,16 +1,10 @@
 #!/usr/bin/env python3
-"""Re-run the 7 domains from the 2026-07-30 multidomain stall report now that
-the algotune pipeline-routing bug is fixed (commit de0e7644).
+"""Run the seven-domain validation set with the default stall timeout."""
 
-Unlike the earlier ad-hoc retry script, this does NOT override
-stall_watchdog.stall_timeout_s -- the 240s override is what caused the
-gsm8k false-positive watchdog trip in the original report. Default (300s)
-is used instead.
-"""
+from pathlib import Path
 import subprocess
 import sys
 import time
-from pathlib import Path
 
 import redis
 
@@ -44,7 +38,8 @@ def main() -> None:
             print("flush error:", e)
 
         cmd = [
-            sys.executable, str(REPO / "run.py"),
+            sys.executable,
+            str(REPO / "run.py"),
             f"problem.name={task}",
             f"max_mutants={MAX_MUTANTS}",
             "llm=summer_school_servers",

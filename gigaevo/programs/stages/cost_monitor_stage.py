@@ -3,9 +3,8 @@
 Runs the agent periodically (every N mutants) and returns adjustments
 that feed into ``calibrate_prediction()`` via the live cost model.
 """
-from __future__ import annotations
 
-from typing import Any
+from __future__ import annotations
 
 from loguru import logger
 from pydantic import BaseModel, Field
@@ -25,6 +24,7 @@ from gigaevo.programs.stages.stage_registry import StageRegistry
 
 class _CostMonitorInput(BaseModel):
     """Input for CostMonitorStage — received from DAG edges."""
+
     program: Program | None = None
     parent_program: Program | None = None
     cost_prediction: CostPrediction | None = None
@@ -32,6 +32,7 @@ class _CostMonitorInput(BaseModel):
 
 class _CostMonitorOutput(BaseModel):
     """Adjustments returned to the cost model."""
+
     cold_start_factor: float = Field(default=-1.0)
     golden_ratio: float = Field(default=-1.0)
     growth_rate_mult: float = Field(default=-1.0)
@@ -40,7 +41,9 @@ class _CostMonitorOutput(BaseModel):
     reasoning: str = Field(default="")
 
 
-@StageRegistry.register(description="Live LLM cost monitor — adjusts cost model in real time")
+@StageRegistry.register(
+    description="Live LLM cost monitor — adjusts cost model in real time"
+)
 class CostMonitorStage(Stage):
     InputsModel = VoidInput
     OutputModel = DictContainer

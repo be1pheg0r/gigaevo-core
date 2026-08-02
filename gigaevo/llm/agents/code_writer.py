@@ -49,7 +49,9 @@ def _best_parseable(code: str) -> str | None:
     return None
 
 
-_GIGAEVO_IMPORT_RE = re.compile(r"^\s*(?:from|import)\s+(gigaevo(?:\.\w+)*)", re.MULTILINE)
+_GIGAEVO_IMPORT_RE = re.compile(
+    r"^\s*(?:from|import)\s+(gigaevo(?:\.\w+)*)", re.MULTILINE
+)
 
 
 def _new_gigaevo_import(stub_code: str, code: str) -> str | None:
@@ -193,7 +195,11 @@ class CodeWriterAgent(LangGraphAgent):
                 )
                 logger.warning(
                     "[CodeWriterAgent] attempt {}/{} for {} ({}): {}",
-                    attempt + 1, max_attempts, file_kind, problem_name, last_problem,
+                    attempt + 1,
+                    max_attempts,
+                    file_kind,
+                    problem_name,
+                    last_problem,
                 )
                 continue
             code = final_state["code"]
@@ -209,7 +215,12 @@ class CodeWriterAgent(LangGraphAgent):
                 retry_note = last_problem
                 logger.warning(
                     "[CodeWriterAgent] attempt {}/{} for {} ({}): {}\n--- raw response ---\n{}",
-                    attempt + 1, max_attempts, file_kind, problem_name, last_problem, code,
+                    attempt + 1,
+                    max_attempts,
+                    file_kind,
+                    problem_name,
+                    last_problem,
+                    code,
                 )
                 continue
             if _looks_like_unimplemented_stub(parseable):
@@ -221,7 +232,11 @@ class CodeWriterAgent(LangGraphAgent):
                 retry_note = last_problem
                 logger.warning(
                     "[CodeWriterAgent] attempt {}/{} for {} ({}): {}",
-                    attempt + 1, max_attempts, file_kind, problem_name, last_problem,
+                    attempt + 1,
+                    max_attempts,
+                    file_kind,
+                    problem_name,
+                    last_problem,
                 )
                 continue
             bad_import = _new_gigaevo_import(stub_code, parseable)
@@ -234,7 +249,11 @@ class CodeWriterAgent(LangGraphAgent):
                 retry_note = last_problem
                 logger.warning(
                     "[CodeWriterAgent] attempt {}/{} for {} ({}): {}",
-                    attempt + 1, max_attempts, file_kind, problem_name, last_problem,
+                    attempt + 1,
+                    max_attempts,
+                    file_kind,
+                    problem_name,
+                    last_problem,
                 )
                 continue
             return parseable

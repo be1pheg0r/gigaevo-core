@@ -51,8 +51,11 @@ def _valid_config(**overrides) -> ProblemConfig:
         validation=FunctionSignature(params=[ParameterSpec(name="solution")]),
         metrics={
             "fitness": MetricSpec(
-                description="speed", is_primary=True, higher_is_better=True,
-                lower_bound=0.0, upper_bound=1.0,
+                description="speed",
+                is_primary=True,
+                higher_is_better=True,
+                lower_bound=0.0,
+                upper_bound=1.0,
             )
         },
         task_description=TaskDescription(objective="Sort faster than baseline"),

@@ -91,9 +91,7 @@ def test_appends_multiple_calls_across_invocations(monkeypatch, tmp_path) -> Non
             error_type=None if attempt == 2 else "TimeoutError",
         )
 
-    lines = [
-        line for line in log_file.read_text(encoding="utf-8").splitlines() if line
-    ]
+    lines = [line for line in log_file.read_text(encoding="utf-8").splitlines() if line]
     assert len(lines) == 2
     bodies = [json.loads(_LINE_RE.search(line).group(1)) for line in lines]
     assert [b["attempt"] for b in bodies] == [1, 2]

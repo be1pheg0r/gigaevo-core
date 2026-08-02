@@ -5,7 +5,12 @@ import pytest
 from gigaevo.monitoring.cost_monitor_hook import CostMonitorHook, _clamp_step
 from gigaevo.monitoring.cost_predictor import CostPrediction
 from gigaevo.monitoring.emit import emit, reset_subscribers
-from gigaevo.monitoring.events import BackpressureSample, LLMCall, MutationAttempted, StageExec
+from gigaevo.monitoring.events import (
+    BackpressureSample,
+    LLMCall,
+    MutationAttempted,
+    StageExec,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -15,10 +20,17 @@ def _cleanup():
 
 
 def _call(stage: str, tokens: int, latency_ms: float, tokens_out: int = 0) -> None:
-    emit(LLMCall(
-        stage=stage, endpoint="", model="x", ok=True,
-        latency_ms=latency_ms, tokens_in=tokens, tokens_out=tokens_out,
-    ))
+    emit(
+        LLMCall(
+            stage=stage,
+            endpoint="",
+            model="x",
+            ok=True,
+            latency_ms=latency_ms,
+            tokens_in=tokens,
+            tokens_out=tokens_out,
+        )
+    )
 
 
 async def _fire(hook: CostMonitorHook) -> None:
@@ -29,7 +41,9 @@ class TestMutantBucketing:
     @pytest.mark.asyncio
     async def test_calls_are_bucketed_per_mutant_not_per_call(self) -> None:
         pred = CostPrediction(max_mutants=10, max_in_flight=1)
-        hook = CostMonitorHook(agent=None, prediction=pred, interval=1000)  # never fire agent
+        hook = CostMonitorHook(
+            agent=None, prediction=pred, interval=1000
+        )  # never fire agent
 
         # Mutant 1: two calls of stage A.
         _call("A", 100, 0.0)
@@ -43,7 +57,9 @@ class TestMutantBucketing:
         assert hook._tokens_by_stage["A"] == [150.0, 200.0]
 
     @pytest.mark.asyncio
-    async def test_estimate_updates_prediction_every_mutant_not_just_on_agent_interval(self) -> None:
+    async def test_estimate_updates_prediction_every_mutant_not_just_on_agent_interval(
+        self,
+    ) -> None:
         pred = CostPrediction(max_mutants=10, max_in_flight=1)
         hook = CostMonitorHook(agent=None, prediction=pred, interval=1000)
 
@@ -74,22 +90,28 @@ class TestMutantBucketing:
         assert pred.predicted_duration_s > 0
 
 
-# Freeze the clock so the anchored estimate's elapsed term is exactly 0 and
-# the override multipliers are the only thing moving the number.
-_FROZEN = (lambda: 0.0)
+def _FROZEN() -> float:
+    return 0.0
 
 
 class TestLlmOverrideAppliesToDuration:
     @pytest.mark.asyncio
     async def test_golden_override_scales_predicted_duration(self) -> None:
         baseline_pred = CostPrediction(max_mutants=10, max_in_flight=1)
-        baseline_hook = CostMonitorHook(agent=None, prediction=baseline_pred, interval=1000, clock=_FROZEN)
+        baseline_hook = CostMonitorHook(
+            agent=None,
+            prediction=baseline_pred,
+            interval=1000,
+            clock=_FROZEN,
+        )
         _call("A", 100, 1000.0, tokens_out=40)
         await _fire(baseline_hook)
 
         overridden_pred = CostPrediction(max_mutants=10, max_in_flight=1)
         overridden_pred.llm_golden_override = 1.5
-        overridden_hook = CostMonitorHook(agent=None, prediction=overridden_pred, interval=1000, clock=_FROZEN)
+        overridden_hook = CostMonitorHook(
+            agent=None, prediction=overridden_pred, interval=1000, clock=_FROZEN
+        )
         _call("A", 100, 1000.0, tokens_out=40)
         await _fire(overridden_hook)
 
@@ -100,14 +122,18 @@ class TestLlmOverrideAppliesToDuration:
     @pytest.mark.asyncio
     async def test_growth_override_compounds_with_golden_override(self) -> None:
         baseline_pred = CostPrediction(max_mutants=10, max_in_flight=1)
-        baseline_hook = CostMonitorHook(agent=None, prediction=baseline_pred, interval=1000, clock=_FROZEN)
+        baseline_hook = CostMonitorHook(
+            agent=None, prediction=baseline_pred, interval=1000, clock=_FROZEN
+        )
         _call("A", 100, 1000.0, tokens_out=40)
         await _fire(baseline_hook)
 
         pred = CostPrediction(max_mutants=10, max_in_flight=1)
         pred.llm_golden_override = 1.2
         pred.llm_growth_override = 2.0
-        hook = CostMonitorHook(agent=None, prediction=pred, interval=1000, clock=_FROZEN)
+        hook = CostMonitorHook(
+            agent=None, prediction=pred, interval=1000, clock=_FROZEN
+        )
         _call("A", 100, 1000.0, tokens_out=40)
         await _fire(hook)
 
@@ -118,16 +144,24 @@ class TestLlmOverrideAppliesToDuration:
     @pytest.mark.asyncio
     async def test_out_of_range_override_is_ignored(self) -> None:
         baseline_pred = CostPrediction(max_mutants=10, max_in_flight=1)
-        baseline_hook = CostMonitorHook(agent=None, prediction=baseline_pred, interval=1000, clock=_FROZEN)
+        baseline_hook = CostMonitorHook(
+            agent=None, prediction=baseline_pred, interval=1000, clock=_FROZEN
+        )
         _call("A", 100, 1000.0, tokens_out=40)
         await _fire(baseline_hook)
 
-        pred = CostPrediction(max_mutants=10, max_in_flight=1)  # defaults: -1.0 (no override)
-        hook = CostMonitorHook(agent=None, prediction=pred, interval=1000, clock=_FROZEN)
+        pred = CostPrediction(
+            max_mutants=10, max_in_flight=1
+        )  # defaults: -1.0 (no override)
+        hook = CostMonitorHook(
+            agent=None, prediction=pred, interval=1000, clock=_FROZEN
+        )
         _call("A", 100, 1000.0, tokens_out=40)
         await _fire(hook)
 
-        assert pred.predicted_duration_s == pytest.approx(baseline_pred.predicted_duration_s)
+        assert pred.predicted_duration_s == pytest.approx(
+            baseline_pred.predicted_duration_s
+        )
 
 
 class FakeAgent:
@@ -157,11 +191,19 @@ class TestAgentSeesRealContext:
         # warmup_attempts=0 -> the first flush already trips the trigger, so
         # the post_step_hook path runs the agent without needing a real
         # confidence-interval breach.
-        hook = CostMonitorHook(agent=agent, prediction=pred, interval=1, warmup_attempts=0)
+        hook = CostMonitorHook(
+            agent=agent, prediction=pred, interval=1, warmup_attempts=0
+        )
 
-        emit(BackpressureSample(
-            producer_held=6, buffer_held=0, in_flight=6, max_in_flight=8, llm_active=6,
-        ))
+        emit(
+            BackpressureSample(
+                producer_held=6,
+                buffer_held=0,
+                in_flight=6,
+                max_in_flight=8,
+                llm_active=6,
+            )
+        )
         _call("A", 100, 10.0)
         await _fire(hook)
 
@@ -175,7 +217,9 @@ class TestAgentSeesRealContext:
         # warmup_attempts=0 -> the first flush already trips the trigger, so
         # the post_step_hook path runs the agent without needing a real
         # confidence-interval breach.
-        hook = CostMonitorHook(agent=agent, prediction=pred, interval=1, warmup_attempts=0)
+        hook = CostMonitorHook(
+            agent=agent, prediction=pred, interval=1, warmup_attempts=0
+        )
 
         _call("A", 100, 10.0)
         await _fire(hook)
@@ -189,7 +233,9 @@ class TestAgentSeesRealContext:
         # warmup_attempts=0 -> the first flush already trips the trigger, so
         # the post_step_hook path runs the agent without needing a real
         # confidence-interval breach.
-        hook = CostMonitorHook(agent=agent, prediction=pred, interval=1, warmup_attempts=0)
+        hook = CostMonitorHook(
+            agent=agent, prediction=pred, interval=1, warmup_attempts=0
+        )
 
         _call("A", 100, 10.0)
         await _fire(hook)
@@ -206,13 +252,16 @@ class TestConcurrencyLever:
         predicted remaining time — the opposite direction to golden_ratio."""
         baseline = CostPrediction(max_mutants=10, max_in_flight=1)
         baseline_hook = CostMonitorHook(
-            agent=None, prediction=baseline, interval=1000, clock=_FROZEN)
+            agent=None, prediction=baseline, interval=1000, clock=_FROZEN
+        )
         _call("A", 100, 1000.0, tokens_out=40)
         await _fire(baseline_hook)
 
         pred = CostPrediction(max_mutants=10, max_in_flight=1)
         pred.llm_concurrency_override = 2.0
-        hook = CostMonitorHook(agent=None, prediction=pred, interval=1000, clock=_FROZEN)
+        hook = CostMonitorHook(
+            agent=None, prediction=pred, interval=1000, clock=_FROZEN
+        )
         _call("A", 100, 1000.0, tokens_out=40)
         await _fire(hook)
 
@@ -224,13 +273,16 @@ class TestConcurrencyLever:
     async def test_out_of_range_concurrency_override_is_ignored(self) -> None:
         baseline = CostPrediction(max_mutants=10, max_in_flight=1)
         baseline_hook = CostMonitorHook(
-            agent=None, prediction=baseline, interval=1000, clock=_FROZEN)
+            agent=None, prediction=baseline, interval=1000, clock=_FROZEN
+        )
         _call("A", 100, 1000.0, tokens_out=40)
         await _fire(baseline_hook)
 
         pred = CostPrediction(max_mutants=10, max_in_flight=1)
         pred.llm_concurrency_override = 99.0
-        hook = CostMonitorHook(agent=None, prediction=pred, interval=1000, clock=_FROZEN)
+        hook = CostMonitorHook(
+            agent=None, prediction=pred, interval=1000, clock=_FROZEN
+        )
         _call("A", 100, 1000.0, tokens_out=40)
         await _fire(hook)
 
@@ -250,17 +302,19 @@ class TestClampStep:
 
 
 def _stage_exec(stage: str, duration_ms: float, decision: str = "miss") -> None:
-    emit(StageExec(
-        stage=stage, program_id="p", decision=decision, duration_ms=duration_ms,
-    ))
+    emit(
+        StageExec(
+            stage=stage,
+            program_id="p",
+            decision=decision,
+            duration_ms=duration_ms,
+        )
+    )
 
 
 class TestNonLlmStageDurationCountsTowardPrediction:
     @pytest.mark.asyncio
     async def test_validator_time_raises_predicted_duration(self) -> None:
-        """A task that's all validator time and ~zero LLM latency used to
-        predict ~0s duration (only LLM_CALL latency was tracked). It should
-        now reflect the real, dominant non-LLM cost."""
         pred = CostPrediction(max_mutants=10, max_in_flight=1)
         hook = CostMonitorHook(agent=None, prediction=pred, interval=1000)
 
@@ -300,12 +354,20 @@ class TestSurpriseTrigger:
 
     def _hook(self, **kw):
         pred = CostPrediction(max_mutants=100, max_in_flight=8)
-        defaults = dict(agent=None, prediction=pred, interval=1000, clock=_FROZEN,
-                        warmup_attempts=10**9, cooldown_attempts=0)
+        defaults = dict(
+            agent=None,
+            prediction=pred,
+            interval=1000,
+            clock=_FROZEN,
+            warmup_attempts=10**9,
+            cooldown_attempts=0,
+        )
         return CostMonitorHook(**{**defaults, **kw, "prediction": pred}), pred
 
     @pytest.mark.asyncio
-    async def test_estimate_inside_previous_interval_does_not_wake_the_agent(self) -> None:
+    async def test_estimate_inside_previous_interval_does_not_wake_the_agent(
+        self,
+    ) -> None:
         hook, _ = self._hook()
         for _ in range(8):  # let the estimate settle; early flushes legitimately jump
             _call("A", 100, 1000.0, tokens_out=40)
@@ -352,7 +414,9 @@ class TestOutlierFlagHasTeeth:
     @pytest.mark.asyncio
     async def test_flagged_call_stops_shaping_the_extrapolated_tail(self) -> None:
         pred = CostPrediction(max_mutants=100, max_in_flight=1)
-        hook = CostMonitorHook(agent=None, prediction=pred, interval=1000, clock=_FROZEN)
+        hook = CostMonitorHook(
+            agent=None, prediction=pred, interval=1000, clock=_FROZEN
+        )
         for _ in range(4):
             _call("A", 100, 100.0, tokens_out=20)
             await _fire(hook)
@@ -384,11 +448,18 @@ class TestAgentFeedback:
     async def test_agent_is_told_what_its_last_decision_did(self) -> None:
         pred = CostPrediction(max_mutants=100, max_in_flight=8)
         agent = FakeAgent()
-        hook = CostMonitorHook(agent=agent, prediction=pred, interval=1, warmup_attempts=0)
+        hook = CostMonitorHook(
+            agent=agent, prediction=pred, interval=1, warmup_attempts=0
+        )
         hook._last_adjustment = {
-            "attempt": 12, "golden": 1.2, "growth": -1.0, "concurrency": -1.0,
-            "outliers": 1, "reasoning": "sustained latency rise",
-            "predicted_duration_s": 900.0, "elapsed_s": 100.0,
+            "attempt": 12,
+            "golden": 1.2,
+            "growth": -1.0,
+            "concurrency": -1.0,
+            "outliers": 1,
+            "reasoning": "sustained latency rise",
+            "predicted_duration_s": 900.0,
+            "elapsed_s": 100.0,
         }
         _call("A", 100, 10.0)
         await _fire(hook)
@@ -401,20 +472,18 @@ class TestAgentFeedback:
     async def test_no_previous_decision_reads_cleanly(self) -> None:
         pred = CostPrediction(max_mutants=100, max_in_flight=8)
         agent = FakeAgent()
-        hook = CostMonitorHook(agent=agent, prediction=pred, interval=1, warmup_attempts=0)
+        hook = CostMonitorHook(
+            agent=agent, prediction=pred, interval=1, warmup_attempts=0
+        )
         _call("A", 100, 10.0)
         await _fire(hook)
-        assert "no previous adjustment" in agent.seen_tools.get_last_adjustment_outcome()
+        assert (
+            "no previous adjustment" in agent.seen_tools.get_last_adjustment_outcome()
+        )
 
 
 class TestObserverIsNotItsOwnTelemetry:
-    """CostMonitorAgent's own LLM calls must never reach the cost model.
-
-    They go through the same LLM_CALL bus as mutations, and on real
-    alphaevolve runs they were 4.7-17.3% of all measured latency with single
-    calls 10-15x the run median — i.e. the observer was the biggest outlier
-    in its own telemetry, and was seen flagging itself as an anomaly.
-    """
+    """Ensure observer calls do not enter the model's telemetry."""
 
     @pytest.mark.asyncio
     async def test_own_calls_are_excluded_from_the_fit(self) -> None:
@@ -428,14 +497,13 @@ class TestObserverIsNotItsOwnTelemetry:
 
         assert "CostMonitorAgent" not in hook._tokens_by_stage
         assert "CostMonitorAgent" not in hook._latency_by_stage
-        assert hook._tokens_by_stage["MutationAgent"] == [11600.0]   # 2x(4800+1000)
-        assert len(hook._call_history) == 2          # the agent call is not indexable
-        assert len(hook._call_times) == 2            # nor does it inflate concurrency
-        assert hook._observer_calls == 1             # but it is still counted somewhere
+        assert hook._tokens_by_stage["MutationAgent"] == [11600.0]  # 2x(4800+1000)
+        assert len(hook._call_history) == 2  # the agent call is not indexable
+        assert len(hook._call_times) == 2  # nor does it inflate concurrency
+        assert hook._observer_calls == 1  # but it is still counted somewhere
 
     @pytest.mark.asyncio
     async def test_the_agentless_stub_is_excluded_too(self) -> None:
-        """Otherwise the ablation compares two different workloads."""
         pred = CostPrediction(max_mutants=10, max_in_flight=1)
         hook = CostMonitorHook(agent=None, prediction=pred, interval=1000)
         _call("NoOpCostMonitorAgent", 500, 1000.0)
@@ -445,15 +513,12 @@ class TestObserverIsNotItsOwnTelemetry:
 
     @pytest.mark.asyncio
     async def test_own_calls_do_not_get_projected_over_the_run(self) -> None:
-        """The stage used to be extrapolated like any recurring per-mutant
-        cost: 4 buckets in 22 attempts projected to 18 agent calls over 100,
-        against a hard budget of 12 and an actual 5."""
         pred = CostPrediction(max_mutants=100, max_in_flight=1)
         hook = CostMonitorHook(agent=None, prediction=pred, interval=1000)
         for i in range(4):
             _call("MutationAgent", 1000, 1000.0, tokens_out=200)
             _call("CostMonitorAgent", 1140, 280_000.0, tokens_out=39)
-            emit(MutationAttempted(mutant_id=f"m{i}"))     # flushes a bucket
+            emit(MutationAttempted(mutant_id=f"m{i}"))  # flushes a bucket
         # 4 buckets over 4 attempts -> 100 projected firings of MutationAgent
         # at 1200 tokens each, and none at all of the observer.
         assert hook._attempts == 4
@@ -483,14 +548,19 @@ class TestOneWakeupRunsOnce:
 
         pred = CostPrediction(max_mutants=100, max_in_flight=8)
         agent = SlowAgent()
-        hook = CostMonitorHook(agent=agent, prediction=pred, interval=1,
-                               warmup_attempts=1, cooldown_attempts=0)
+        hook = CostMonitorHook(
+            agent=agent,
+            prediction=pred,
+            interval=1,
+            warmup_attempts=1,
+            cooldown_attempts=0,
+        )
         _call("MutationAgent", 3800, 30_000.0, tokens_out=1000)
-        emit(MutationAttempted(mutant_id="m1"))       # arms + dispatches a task
-        await asyncio.sleep(0)                        # task starts, blocks on the LLM
+        emit(MutationAttempted(mutant_id="m1"))  # arms + dispatches a task
+        await asyncio.sleep(0)  # task starts, blocks on the LLM
         assert agent.live == 1
 
-        hook._agent_due = True                        # a later flush re-arms it
+        hook._agent_due = True  # a later flush re-arms it
         _call("MutationAgent", 3800, 30_000.0, tokens_out=1000)
         await asyncio.gather(hook(), hook._agent_task)
 
@@ -499,20 +569,23 @@ class TestOneWakeupRunsOnce:
     @pytest.mark.asyncio
     async def test_the_budget_is_charged_once_per_wakeup(self) -> None:
         pred = CostPrediction(max_mutants=100, max_in_flight=8)
-        hook = CostMonitorHook(agent=FakeAgent(), prediction=pred, interval=1,
-                               warmup_attempts=1, cooldown_attempts=0)
+        hook = CostMonitorHook(
+            agent=FakeAgent(),
+            prediction=pred,
+            interval=1,
+            warmup_attempts=1,
+            cooldown_attempts=0,
+        )
         _call("MutationAgent", 100, 10.0)
         emit(MutationAttempted(mutant_id="m1"))
         if hook._agent_task is not None:
             await hook._agent_task
-        await hook()                                   # accept lands right after
+        await hook()  # accept lands right after
         assert hook._agent_calls == 1
 
 
 class TestOnlineIntervalCalibration:
-    """The interval is graded by its own misses and widened/narrowed to hit
-    the target miscoverage — Gibbs & Candes ACI. Measured before this, the
-    published interval covered the truth 64-68% while aiming at 90%."""
+    """Exercise online interval-width calibration."""
 
     def _hook(self, **kw):
         pred = CostPrediction(max_mutants=100, max_in_flight=1)
@@ -537,7 +610,7 @@ class TestOnlineIntervalCalibration:
     async def test_it_settles_when_misses_arrive_at_the_target_rate(self) -> None:
         hook = self._hook(aci_gamma=0.1, aci_alpha=0.10)
         for i in range(400):
-            hook._update_aci(i % 10 == 0)       # exactly 10% miscoverage
+            hook._update_aci(i % 10 == 0)  # exactly 10% miscoverage
         assert 0.8 < hook._aci_scale < 1.25
 
     @pytest.mark.asyncio
@@ -601,7 +674,7 @@ class TestLeverGuards:
         hook = self._hook()
         hook._agent_calls = 1
         hook._gate_lever("golden_ratio", 1.00, 1.40)
-        hook._agent_calls = 9                     # far outside REVERSAL_WINDOW
+        hook._agent_calls = 9  # far outside REVERSAL_WINDOW
         assert hook._gate_lever("golden_ratio", 1.30, 0.50) == pytest.approx(0.91)
 
     def test_a_blunt_lever_needs_a_persistence_claim(self) -> None:
@@ -658,9 +731,11 @@ class TestBudgetMode:
         # budget as if the run cost the top / bottom of its projection.
         hook = self._hook()
         point, (lo, hi) = hook.project_tokens(100)
-        assert (hook.affordable_attempts(110_000 / (hi / point))
-                <= hook.affordable_attempts(110_000)
-                <= hook.affordable_attempts(110_000 / (lo / point)))
+        assert (
+            hook.affordable_attempts(110_000 / (hi / point))
+            <= hook.affordable_attempts(110_000)
+            <= hook.affordable_attempts(110_000 / (lo / point))
+        )
 
     def test_a_budget_already_overspent_is_zero_not_negative(self) -> None:
         assert self._hook().affordable_attempts(1.0) == 0
@@ -674,8 +749,9 @@ class TestBudgetMode:
         """Budget mode quotes quartiles for a reason: on a 10-attempt probe the
         90% band spans a factor of two and answers nothing."""
         pred = CostPrediction(max_mutants=1, max_in_flight=1)
-        hook = CostMonitorHook(agent=None, prediction=pred, interval=1000,
-                               ci_method="montecarlo")
+        hook = CostMonitorHook(
+            agent=None, prediction=pred, interval=1000, ci_method="montecarlo"
+        )
         for i in range(10):
             _call("A", 1000 + 60 * i, 100.0, tokens_out=100)
             emit(MutationAttempted(mutant_id=f"m{i}"))
@@ -688,24 +764,20 @@ class TestBudgetMode:
         """Same horizon, different alpha — one must not be served from the
         other's cache entry."""
         pred = CostPrediction(max_mutants=1, max_in_flight=1)
-        hook = CostMonitorHook(agent=None, prediction=pred, interval=1000,
-                               ci_method="montecarlo")
+        hook = CostMonitorHook(
+            agent=None, prediction=pred, interval=1000, ci_method="montecarlo"
+        )
         for i in range(10):
             _call("A", 1000 + 60 * i, 100.0, tokens_out=100)
             emit(MutationAttempted(mutant_id=f"m{i}"))
         wide = hook.project_tokens(100)[1]
         narrow = hook.project_tokens(100, alpha=0.5)[1]
         assert wide != narrow
-        assert hook.project_tokens(100)[1] == wide          # still the wide one
+        assert hook.project_tokens(100)[1] == wide  # still the wide one
 
 
 class TestUnitProjection:
-    """`_project_units` — how many times a stage will still fire.
-
-    Measured on the 2026-08-01 logs: undercounting this was 21 of the 24
-    percentage points of the estimator's low bias at 10% progress, so it is
-    the single term worth getting right.
-    """
+    """Exercise projection of stage firings to the run horizon."""
 
     def _hook(self) -> CostMonitorHook:
         pred = CostPrediction(max_mutants=100, max_in_flight=1)
@@ -727,11 +799,11 @@ class TestUnitProjection:
             # silent for the first half, then every attempt
             if i >= 10:
                 _call("climbing", 100, 10.0)
-            _call("flat", 100, 10.0)          # keeps the attempt clock moving
+            _call("flat", 100, 10.0)  # keeps the attempt clock moving
             emit(MutationAttempted(mutant_id=f"m{i}"))
 
         seen = len(hook._tokens_by_stage["climbing"])
-        cumulative = round(seen * 100 / hook._attempts)   # what the old code did
+        cumulative = round(seen * 100 / hook._attempts)
         projected = hook._project_units("climbing", seen, 100)
         assert projected > cumulative, (projected, cumulative)
         # trailing rate is ~1/attempt, so ~10 seen + ~80 remaining
@@ -753,14 +825,7 @@ class TestUnitProjection:
 
 
 class TestDisagreementDoesNotFeedOnItself:
-    """The token/clock gap must be read off the UNADJUSTED model.
-
-    Measured on the first live bench: the agent lowered the concurrency
-    multiplier, which raised predicted duration, which lowered clock
-    progress, which widened the gap that woke it — 19 of 20 moves downward,
-    ratcheting 0.65 -> 0.30. A trigger driven by its own response is a
-    control loop, not a signal.
-    """
+    """Ensure agent adjustments do not feed the disagreement trigger."""
 
     def _hook(self) -> CostMonitorHook:
         pred = CostPrediction(max_mutants=100, max_in_flight=1)
@@ -768,7 +833,7 @@ class TestDisagreementDoesNotFeedOnItself:
         for i in range(10):
             _call("A", 1000, 100.0, tokens_out=100)
             emit(MutationAttempted(mutant_id=f"m{i}"))
-        pred.predicted_total_tokens = 40_000      # 11k observed -> ~27% done
+        pred.predicted_total_tokens = 40_000  # 11k observed -> ~27% done
         return hook
 
     def test_the_gap_ignores_the_agents_own_concurrency_move(self) -> None:
@@ -782,31 +847,29 @@ class TestDisagreementDoesNotFeedOnItself:
         # must NOT move as a result.
         hook._pred.llm_concurrency_override = 0.5
         stretched = 300.0 + (1000.0 - 300.0) / 0.5
-        assert hook._progress_disagreement(stretched, 300.0) == pytest.approx(base, abs=1e-9)
+        assert hook._progress_disagreement(stretched, 300.0) == pytest.approx(
+            base, abs=1e-9
+        )
 
     def test_the_gap_ignores_the_blunt_levers_too(self) -> None:
         hook = self._hook()
         base = hook._progress_disagreement(1000.0, 300.0)
         hook._pred.llm_golden_override = 1.5
         inflated = 300.0 + (1000.0 - 300.0) * 1.5
-        assert hook._progress_disagreement(inflated, 300.0) == pytest.approx(base, abs=1e-9)
+        assert hook._progress_disagreement(inflated, 300.0) == pytest.approx(
+            base, abs=1e-9
+        )
 
     def test_a_real_divergence_still_registers(self) -> None:
         """Undoing the levers must not flatten the signal itself."""
         hook = self._hook()
         near = hook._progress_disagreement(1000.0, 300.0)
-        far = hook._progress_disagreement(1000.0, 800.0)   # clock much further on
+        far = hook._progress_disagreement(1000.0, 800.0)  # clock much further on
         assert far > near
 
 
 class TestTailCalibration:
-    """TAIL_CALIBRATION: the measured shortfall of the remaining term.
-
-    The table is the median of (actual-elapsed)/(predicted-elapsed) over 37
-    recorded runs. It removes the estimator's systematic undershoot; what it
-    cannot remove is run-to-run spread, which is measured LARGER within a
-    repeated task than between tasks.
-    """
+    """Exercise interpolation of the empirical tail calibration."""
 
     def _hook(self, attempts: int, cap: int = 100) -> CostMonitorHook:
         pred = CostPrediction(max_mutants=cap, max_in_flight=1)
@@ -839,19 +902,13 @@ class TestTailCalibration:
 
     def test_progress_is_measured_against_the_cap_not_the_count(self) -> None:
         """Same fraction of two differently sized runs -> same correction."""
-        assert (self._hook(10, cap=100)._tail_calibration()
-                == pytest.approx(self._hook(7, cap=70)._tail_calibration(), abs=0.02))
+        assert self._hook(10, cap=100)._tail_calibration() == pytest.approx(
+            self._hook(7, cap=70)._tail_calibration(), abs=0.02
+        )
 
 
 class TestProgramSizeProxy:
-    """The `programs` diagnosis needs evidence that programs are growing.
-
-    `_ToolSet` has always accepted baseline/current program length and the
-    hook never passed them, so `get_model_params` read "program_len: 0->0"
-    and half of the prompt's rule 4 was unsatisfiable — across 35 wake-ups
-    the agent picked `programs` zero times. The mutation prompt carries the
-    program source, so its tokens_in is that size up to an offset.
-    """
+    """Exercise the mutation-prompt token proxy for program size."""
 
     def _hook(self) -> CostMonitorHook:
         pred = CostPrediction(max_mutants=100, max_in_flight=1)

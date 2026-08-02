@@ -1,34 +1,20 @@
 #!/usr/bin/env python3
-"""Cost Lab — web console for the cost-prediction ablation.
+"""Web console for launching and analysing cost-prediction experiments."""
 
-Launch `tools/cost_ablation/run_ablation.py` from a browser, watch the runs
-while they happen, and read afterwards whether CostMonitorAgent actually
-improved on the automatic estimator.
-
-Backend is deliberately thin: it shells out to the same run_ablation.py the
-CLI uses (no second launch path to keep in sync), reuses build_report.py's
-log parser, and ships raw prediction series to the frontend, which computes
-the error grid itself. The only thing parsed here that build_report.py does
-not already parse is the agent's own adjustment log line — the record of
-when the agent woke, what tripped it, and which lever it moved.
-
-Run on the summer-school server:
-    cd ~/gigaevo-core && nohup python3 tools/cost_lab_web/app.py > ~/cost_lab_web.log 2>&1 &
-"""
 from __future__ import annotations
 
 import ast
+from dataclasses import dataclass
 import importlib.util
 import io
 import json
 import os
+from pathlib import Path
 import re
 import subprocess
 import sys
 import time
 import zipfile
-from dataclasses import dataclass
-from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
@@ -46,9 +32,7 @@ EXPERIMENTS = REPO / "experiments"
 STATIC_DIR = Path(__file__).parent / "static"
 PORT = int(os.environ.get("COST_LAB_PORT", "8091"))
 
-# A run whose log has not grown in this long, and which has no Duration:
-# line, is treated as dead rather than running — survives an app restart
-# without having to track pids across processes.
+# Maximum log inactivity before an unfinished run is considered stopped.
 STALE_AFTER_S = 180
 
 ADJ_RE = re.compile(
@@ -59,13 +43,10 @@ TRACE_RE = re.compile(r"\[CostMonitorAgentTrace\] (\{.*\})")
 ATT_RE = re.compile(r"\[MUTATION_ATTEMPTED\]")
 TS_RE = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\.\d+")
 CALL_RE = re.compile(r"\[LLM_CALL\] (\{.*\})")
-# One line per program that made it through the validator — the search's own
-# progress, which the cost model says nothing about.
+# Fitness records provide search progress independently of the cost model.
 FIT_RE = re.compile(r"\[FetchMetrics\] \w+ metrics=(\{.*\})")
 
-# The monitor's own inference is emitted as an LLM_CALL like any other stage
-# (LangGraphAgent.acall_llm), so it lands in the very telemetry the cost model
-# is fitted on. Naming it here lets the console show what that costs.
+# Observer calls are reported separately from the monitored workload.
 OBSERVER_STAGE = "CostMonitorAgent"
 
 # Imports every problem gets for free — never reported as a missing dependency.
@@ -74,12 +55,7 @@ _dep_cache: dict[str, tuple[float, list[str]]] = {}
 
 
 def missing_deps(problem_dir: Path) -> list[str]:
-    """Third-party modules a problem imports that this environment lacks.
-
-    Catches the trap that `prompts/sudoku` walked into: the problem exists and
-    launches fine, then every single mutant dies in the validator because the
-    box has no `vllm`. Cheaper to say so before spending an hour of GPU.
-    """
+    """Return unavailable third-party modules imported by a problem."""
     key = problem_dir.as_posix()
     try:
         stamp = max(p.stat().st_mtime for p in problem_dir.rglob("*.py"))
@@ -101,10 +77,7 @@ def missing_deps(problem_dir: Path) -> list[str]:
             elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
                 mods.add(node.module.split(".")[0])
 
-    # A problem's own files are importable at runtime because the problem dir
-    # goes on sys.path (see python_executors/exec_runner.py), but they are not
-    # importable from here — without this, `from helper import ...` reads as a
-    # missing dependency and the preflight cries wolf on most of alphaevolve.
+    # Local problem modules are added to sys.path by the executor.
     siblings = {p.stem for p in problem_dir.rglob("*.py")}
 
     missing = []
@@ -122,9 +95,11 @@ def missing_deps(problem_dir: Path) -> list[str]:
 
 # --------------------------------------------------------------- repo state
 
+
 def _git(*args: str) -> str:
-    return subprocess.run(["git", *args], cwd=REPO, capture_output=True,
-                          text=True, timeout=120).stdout.strip()
+    return subprocess.run(
+        ["git", *args], cwd=REPO, capture_output=True, text=True, timeout=120
+    ).stdout.strip()
 
 
 def repo_state() -> dict:
@@ -136,12 +111,14 @@ def repo_state() -> dict:
         "head": _git("rev-parse", "--short", "HEAD"),
         "subject": _git("log", "-1", "--format=%s"),
         "authored": _git("log", "-1", "--format=%ar"),
-        "behind": int(behind), "ahead": int(ahead),
+        "behind": int(behind),
+        "ahead": int(ahead),
         "dirty": bool(_git("status", "--porcelain", "--untracked-files=no")),
     }
 
 
 # ------------------------------------------------------------------ problems
+
 
 def list_problems() -> list[dict]:
     """Every runnable problem, as `problem.name` values grouped by family."""
@@ -149,19 +126,24 @@ def list_problems() -> list[dict]:
     for metrics in sorted((REPO / "problems").rglob("metrics.yaml")):
         name = metrics.parent.relative_to(REPO / "problems").as_posix()
         parts = name.split("/")
-        out.append({
-            "name": name,
-            "family": parts[0] if len(parts) > 1 else "standalone",
-            "label": "/".join(parts[1:]) if len(parts) > 1 else name,
-            "seeds": len(list((metrics.parent / "initial_programs").glob("*.py"))),
-            "missing_deps": missing_deps(metrics.parent),
-        })
+        out.append(
+            {
+                "name": name,
+                "family": parts[0] if len(parts) > 1 else "standalone",
+                "label": "/".join(parts[1:]) if len(parts) > 1 else name,
+                "seeds": len(list((metrics.parent / "initial_programs").glob("*.py"))),
+                "missing_deps": missing_deps(metrics.parent),
+            }
+        )
     return out
 
 
 # --------------------------------------------------------------- experiments
 
-def parse_agent_events(path: Path) -> tuple[list[dict], int, dict[str, dict], list[float]]:
+
+def parse_agent_events(
+    path: Path,
+) -> tuple[list[dict], int, dict[str, dict], list[float]]:
     """The agent's own wakeup record: attempt, trigger, levers, reasoning.
 
     Returns the events, the total `[MUTATION_ATTEMPTED]` count (the fallback
@@ -174,8 +156,8 @@ def parse_agent_events(path: Path) -> tuple[list[dict], int, dict[str, dict], li
     where all four are -1 is a wakeup that changed nothing — worth showing,
     because a monitor that wakes constantly and never acts is its own finding.
     """
-    traces: list[dict] = []   # new format: decision + the evidence behind it
-    legacy: list[dict] = []   # pre-trace logs: the decision alone
+    traces: list[dict] = []  # new format: decision + the evidence behind it
+    legacy: list[dict] = []  # pre-trace logs: the decision alone
     attempts = 0
     stages: dict[str, dict] = {}
     fitness: list[float] = []
@@ -200,13 +182,17 @@ def parse_agent_events(path: Path) -> tuple[list[dict], int, dict[str, dict], li
                     c = json.loads(m.group(1))
                 except json.JSONDecodeError:
                     continue
-                s = stages.setdefault(c.get("stage") or "?",
-                                      {"calls": 0, "latency_ms": 0.0, "tokens": 0, "max_latency_ms": 0.0})
+                s = stages.setdefault(
+                    c.get("stage") or "?",
+                    {"calls": 0, "latency_ms": 0.0, "tokens": 0, "max_latency_ms": 0.0},
+                )
                 lat = float(c.get("latency_ms") or 0.0)
                 s["calls"] += 1
                 s["latency_ms"] += lat
                 s["max_latency_ms"] = max(s["max_latency_ms"], lat)
-                s["tokens"] += int(c.get("tokens_in") or 0) + int(c.get("tokens_out") or 0)
+                s["tokens"] += int(c.get("tokens_in") or 0) + int(
+                    c.get("tokens_out") or 0
+                )
                 continue
             m = TRACE_RE.search(line)
             if m:
@@ -214,24 +200,28 @@ def parse_agent_events(path: Path) -> tuple[list[dict], int, dict[str, dict], li
                     t = json.loads(m.group(1))
                 except json.JSONDecodeError:
                     continue
-                levers = {k: (None if v is None or v < 0 else v)
-                          for k, v in (t.get("levers") or {}).items()}
+                levers = {
+                    k: (None if v is None or v < 0 else v)
+                    for k, v in (t.get("levers") or {}).items()
+                }
                 ts = TS_RE.match(line)
-                traces.append({
-                    "attempt": t.get("attempt", attempts),
-                    "levers": levers,
-                    "levers_before": t.get("levers_before") or {},
-                    "moved": [k for k, v in levers.items() if v is not None],
-                    "actions": t.get("actions", []),
-                    "outliers": len(t.get("flag_outlier_indices") or []),
-                    "outlier_indices": t.get("flag_outlier_indices") or [],
-                    "skip_calibration": t.get("skip_calibration", False),
-                    "trigger": t.get("trigger", ""),
-                    "reason": (t.get("reasoning") or "").strip(),
-                    "evidence": t.get("evidence") or {},
-                    "ts": ts.group(1) if ts else None,
-                    "line": lineno,
-                })
+                traces.append(
+                    {
+                        "attempt": t.get("attempt", attempts),
+                        "levers": levers,
+                        "levers_before": t.get("levers_before") or {},
+                        "moved": [k for k, v in levers.items() if v is not None],
+                        "actions": t.get("actions", []),
+                        "outliers": len(t.get("flag_outlier_indices") or []),
+                        "outlier_indices": t.get("flag_outlier_indices") or [],
+                        "skip_calibration": t.get("skip_calibration", False),
+                        "trigger": t.get("trigger", ""),
+                        "reason": (t.get("reasoning") or "").strip(),
+                        "evidence": t.get("evidence") or {},
+                        "ts": ts.group(1) if ts else None,
+                        "line": lineno,
+                    }
+                )
                 continue
             m = ADJ_RE.search(line)
             if not m:
@@ -245,23 +235,29 @@ def parse_agent_events(path: Path) -> tuple[list[dict], int, dict[str, dict], li
                     return None
                 return None if f_ < 0 else f_
 
-            levers = {"cold_start": num(cold), "golden_ratio": num(golden),
-                      "growth_rate": num(growth), "concurrency": num(conc)}
+            levers = {
+                "cold_start": num(cold),
+                "golden_ratio": num(golden),
+                "growth_rate": num(growth),
+                "concurrency": num(conc),
+            }
             ts = TS_RE.match(line)
-            legacy.append({
-                "attempt": attempts,
-                "levers": levers,
-                "moved": [k for k, v in levers.items() if v is not None],
-                "actions": [],
-                "outliers": int(outliers),
-                "outlier_indices": [],
-                "skip_calibration": False,
-                "trigger": trigger,
-                "reason": reason.strip(),
-                "evidence": {},
-                "ts": ts.group(1) if ts else None,
-                "line": lineno,
-            })
+            legacy.append(
+                {
+                    "attempt": attempts,
+                    "levers": levers,
+                    "moved": [k for k, v in levers.items() if v is not None],
+                    "actions": [],
+                    "outliers": int(outliers),
+                    "outlier_indices": [],
+                    "skip_calibration": False,
+                    "trigger": trigger,
+                    "reason": reason.strip(),
+                    "evidence": {},
+                    "ts": ts.group(1) if ts else None,
+                    "line": lineno,
+                }
+            )
     # Both lines are written for the same wakeup, so a log that has traces
     # must be read only through them — the legacy line would double-count.
     return (traces or legacy), attempts, stages, fitness
@@ -291,16 +287,27 @@ def fitness_spec(task: str) -> dict:
     hit = _fitness_spec_cache.get(task)
     if hit is not None:
         return hit
-    spec = {"higher_is_better": True, "target": None, "label": "fitness", "sentinel": None}
+    spec = {
+        "higher_is_better": True,
+        "target": None,
+        "label": "fitness",
+        "sentinel": None,
+    }
     path = REPO / "problems" / task / "metrics.yaml"
     try:
         import yaml
 
-        f = (yaml.safe_load(path.read_text(encoding="utf-8")) or {}).get("specs", {}).get("fitness", {})
+        f = (
+            (yaml.safe_load(path.read_text(encoding="utf-8")) or {})
+            .get("specs", {})
+            .get("fitness", {})
+        )
         spec["higher_is_better"] = bool(f.get("higher_is_better", True))
         # The bound the problem was written against is the paper's target; on a
         # minimised metric it is the lower bound instead.
-        spec["target"] = f.get("upper_bound") if spec["higher_is_better"] else f.get("lower_bound")
+        spec["target"] = (
+            f.get("upper_bound") if spec["higher_is_better"] else f.get("lower_bound")
+        )
         spec["label"] = f.get("description") or "fitness"
         # "this program failed", not a fitness: -1000 on a maximised metric,
         # +1000 on a minimised one. Left in the series but kept out of the
@@ -366,9 +373,15 @@ def driver_state(name: str) -> dict:
 def experiment_dirs() -> list[Path]:
     if not EXPERIMENTS.exists():
         return []
-    return sorted((d for d in EXPERIMENTS.iterdir()
-                   if d.is_dir() and (d / "manifest.json").exists()),
-                  key=lambda d: d.stat().st_mtime, reverse=True)
+    return sorted(
+        (
+            d
+            for d in EXPERIMENTS.iterdir()
+            if d.is_dir() and (d / "manifest.json").exists()
+        ),
+        key=lambda d: d.stat().st_mtime,
+        reverse=True,
+    )
 
 
 def load_manifest(d: Path) -> list[dict]:
@@ -383,7 +396,7 @@ class Launch:
     name: str
     proc: subprocess.Popen
     cmd: list[str]
-    stopped: bool = False   # killed on request, so a non-zero exit isn't a crash
+    stopped: bool = False  # killed on request, so a non-zero exit isn't a crash
 
 
 _launches: dict[str, Launch] = {}
@@ -408,11 +421,18 @@ async def api_repo() -> dict:
 @app.post("/api/repo/pull")
 async def api_pull() -> dict:
     branch = repo_state()["branch"]
-    r = subprocess.run(["git", "pull", "--ff-only", "origin", branch],
-                       cwd=REPO, capture_output=True, text=True, timeout=300)
-    return {"ok": r.returncode == 0,
-            "output": (r.stdout + r.stderr).strip()[-4000:],
-            "repo": repo_state()}
+    r = subprocess.run(
+        ["git", "pull", "--ff-only", "origin", branch],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    return {
+        "ok": r.returncode == 0,
+        "output": (r.stdout + r.stderr).strip()[-4000:],
+        "repo": repo_state(),
+    }
 
 
 @app.get("/api/problems")
@@ -426,39 +446,47 @@ async def api_experiments() -> list[dict]:
     seen = set()
     for d in experiment_dirs():
         manifest = load_manifest(d)
-        statuses = [run_status(REPO / e["log"], "Duration:" in _peek(REPO / e["log"]))
-                    for e in manifest]
+        statuses = [
+            run_status(REPO / e["log"], "Duration:" in _peek(REPO / e["log"]))
+            for e in manifest
+        ]
         drv = driver_state(d.name)
         seen.add(d.name)
-        out.append({
-            "name": d.name,
-            "created": d.stat().st_mtime,
-            "n_runs": len(manifest),
-            "tasks": sorted({e["task"] for e in manifest}),
-            "running": statuses.count("running"),
-            "done": statuses.count("done"),
-            "launching": drv["alive"],
-            "failed": drv["failed"],
-        })
+        out.append(
+            {
+                "name": d.name,
+                "created": d.stat().st_mtime,
+                "n_runs": len(manifest),
+                "tasks": sorted({e["task"] for e in manifest}),
+                "running": statuses.count("running"),
+                "done": statuses.count("done"),
+                "launching": drv["alive"],
+                "failed": drv["failed"],
+            }
+        )
     # A launch that died before writing its manifest has only a driver log —
     # list it anyway, otherwise a failed start is indistinguishable from a
     # button that did nothing.
-    for name, launch in _launches.items():
+    for name in _launches:
         if name in seen:
             continue
         drv = driver_state(name)
-        out.append({
-            "name": name, "created": time.time(), "n_runs": 0, "tasks": [],
-            "running": 0, "done": 0, "launching": drv["alive"], "failed": drv["failed"],
-        })
+        out.append(
+            {
+                "name": name,
+                "created": time.time(),
+                "n_runs": 0,
+                "tasks": [],
+                "running": 0,
+                "done": 0,
+                "launching": drv["alive"],
+                "failed": drv["failed"],
+            }
+        )
     return sorted(out, key=lambda e: e["created"], reverse=True)
 
 
-# ponytail: fixed-size tail instead of parsing the whole log on every poll —
-# run.py's `Duration:` line is followed by shutdown chatter, so the window has
-# to be generous. If a run ever logs more than this after finishing, the list
-# will call it "stopped" while the detail view (full parse) says "done"; move
-# to an index file if that shows up.
+# Tail window used for inexpensive run-status polling.
 _PEEK_BYTES = 256 * 1024
 
 
@@ -483,7 +511,11 @@ async def api_experiment(name: str) -> dict:
         raise HTTPException(404, "unknown experiment")
     manifest = load_manifest(d)
     runs = [summarize_run(e) for e in manifest]
-    report = sorted(p.name for p in (d / "report").glob("*")) if (d / "report").exists() else []
+    report = (
+        sorted(p.name for p in (d / "report").glob("*"))
+        if (d / "report").exists()
+        else []
+    )
     return {
         "name": name,
         "created": d.stat().st_mtime if d.exists() else time.time(),
@@ -503,30 +535,37 @@ async def api_launch(body: NewExperiment) -> dict:
 
     slug = re.sub(r"[^a-z0-9]+", "-", body.label.lower()).strip("-") or "ablation"
     name = f"{slug}_{time.strftime('%Y%m%d_%H%M%S')}"
-    cmd = [sys.executable, "-u", "tools/cost_ablation/run_ablation.py",
-           "--tasks", *body.tasks,
-           "--max-mutants", str(body.max_mutants),
-           "--wave-size", str(body.wave_size),
-           "--llm", body.llm,
-           "--skip-report",
-           "--out-dir", f"experiments/{name}"]
+    cmd = [
+        sys.executable,
+        "-u",
+        "tools/cost_ablation/run_ablation.py",
+        "--tasks",
+        *body.tasks,
+        "--max-mutants",
+        str(body.max_mutants),
+        "--wave-size",
+        str(body.wave_size),
+        "--llm",
+        body.llm,
+        "--skip-report",
+        "--out-dir",
+        f"experiments/{name}",
+    ]
     log = EXPERIMENTS / f"{name}.driver.log"
     log.parent.mkdir(parents=True, exist_ok=True)
-    proc = subprocess.Popen(cmd, cwd=REPO, stdout=open(log, "w"),
-                            stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                            start_new_session=True)  # outlives an app restart
+    proc = subprocess.Popen(
+        cmd,
+        cwd=REPO,
+        stdout=open(log, "w"),
+        stderr=subprocess.STDOUT,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+    )  # outlives an app restart
     _launches[name] = Launch(name=name, proc=proc, cmd=cmd)
     return {"name": name, "cmd": " ".join(cmd)}
 
 
-# ----------------------------------------------------------------- budget mode
-#
-# "Do I have enough tokens for N mutants?" answered by spending a little to
-# find out: run the real pipeline for a handful of attempts, then ask the same
-# growth laws about a horizon the probe never reached. Measured on the
-# 2026-07-31 logs, a 10-attempt probe lands within about ±45% on the point
-# estimate and its interval covers the truth — so the answer is quoted as a
-# range, and the cautious end is the one to plan against.
+# Number of real attempts used to initialise a budget projection.
 PROBE_ATTEMPTS = 10
 
 
@@ -554,13 +593,7 @@ _probe_cache: dict[str, tuple[tuple, dict | None]] = {}
 
 
 def probe_answer(p: Probe) -> dict | None:
-    """Replay the probe's own log and answer both questions, or None if it
-    has not produced enough events yet.
-
-    Cached against the log's size+mtime: the console polls this every couple of
-    seconds, and a replay plus three bisections over a montecarlo interval is
-    not something to redo while nothing has changed.
-    """
+    """Project cost and affordable attempts from a probe log."""
     if not p.log.exists():
         return None
     # The question is part of the key, not just the log: two probes can share
@@ -579,14 +612,8 @@ def probe_answer(p: Probe) -> dict | None:
     if point <= 0:
         return None
     fits = hi <= p.budget_tokens
-    # The horizon question, answered as ONE range rather than three numbers:
-    # cost between its median and its upper quartile, which is the band worth
-    # planning against. The 90% interval above is what the estimate publishes
-    # about itself; on a 10-attempt probe it spans a factor of two and reads
-    # as "no idea", so it stays out of the headline sentence.
+    # Use the upper quartile for the conservative end of the planning range.
     q75 = hook.project_tokens(p.attempts, alpha=0.5)[1][1]
-    # More tokens per run buys fewer attempts, so the pessimistic cost gives
-    # the LOW end of the attempts range.
     n_hi = hook.affordable_attempts(p.budget_tokens)
     n_lo = hook.affordable_attempts(p.budget_tokens / max(q75 / point, 1.0))
     answer = {
@@ -595,10 +622,9 @@ def probe_answer(p: Probe) -> dict | None:
         "budget_tokens": p.budget_tokens,
         "predicted_tokens": point,
         "ci": [lo, hi],
-        # "Enough" only if even the top of the interval fits. Anything else is
-        # a coin flip dressed up as a yes.
-        "verdict": "fits" if fits else ("tight" if point <= p.budget_tokens else "over"),
-        # Median-to-upper-quartile, in attempts. Read as "хватит на n_lo–n_hi".
+        "verdict": "fits"
+        if fits
+        else ("tight" if point <= p.budget_tokens else "over"),
         "affordable": [min(n_lo, n_hi), max(n_lo, n_hi)],
     }
     _probe_cache[p.name] = (stamp, answer)
@@ -611,7 +637,9 @@ async def api_budget_start(body: BudgetProbe) -> dict:
         raise HTTPException(400, f"unknown problem: {body.task}")
     missing = missing_deps(REPO / "problems" / body.task)
     if missing:
-        raise HTTPException(400, f"problem needs modules this box lacks: {', '.join(missing)}")
+        raise HTTPException(
+            400, f"problem needs modules this box lacks: {', '.join(missing)}"
+        )
     try:
         db = find_free_dbs(1)[0]
     except (RuntimeError, OSError) as exc:
@@ -620,11 +648,16 @@ async def api_budget_start(body: BudgetProbe) -> dict:
     name = f"probe_{re.sub(r'[^a-z0-9]+', '-', body.task.lower()).strip('-')}_{time.strftime('%Y%m%d_%H%M%S')}"
     log = EXPERIMENTS / f"{name}.log"
     log.parent.mkdir(parents=True, exist_ok=True)
-    # Same launcher the ablation uses — agentless, because the probe measures
-    # what the pipeline costs, and the agent is not part of that cost.
+    # Probe the underlying pipeline without observer overhead.
     proc = launch(body.task, db, PROBE_ATTEMPTS, body.llm, "agentless", log)
-    _probes[name] = Probe(name=name, task=body.task, attempts=body.attempts,
-                          budget_tokens=body.budget_tokens, proc=proc, log=log)
+    _probes[name] = Probe(
+        name=name,
+        task=body.task,
+        attempts=body.attempts,
+        budget_tokens=body.budget_tokens,
+        proc=proc,
+        log=log,
+    )
     return {"name": name, "probe_attempts": PROBE_ATTEMPTS, "db": db}
 
 
@@ -635,7 +668,9 @@ async def api_budget_state(name: str) -> dict:
         raise HTTPException(404, "unknown probe")
     rc = p.proc.poll()
     return {
-        "name": name, "task": p.task, "probe_attempts": PROBE_ATTEMPTS,
+        "name": name,
+        "task": p.task,
+        "probe_attempts": PROBE_ATTEMPTS,
         "alive": rc is None,
         "failed": rc is not None and rc != 0 and probe_answer(p) is None,
         "stem": p.log.stem,
@@ -667,9 +702,16 @@ async def api_stop(name: str) -> dict:
     # Killing the driver already worked at this point, so a missing pkill must
     # not turn the whole request into a 500 and hide that.
     try:
-        rc = subprocess.run(["pkill", "-f", f"experiments/{name}"], capture_output=True).returncode
+        rc = subprocess.run(
+            ["pkill", "-f", f"experiments/{name}"], capture_output=True
+        ).returncode
     except OSError as exc:
-        return {"ok": True, "driver_killed": killed, "pkill_rc": None, "warning": str(exc)}
+        return {
+            "ok": True,
+            "driver_killed": killed,
+            "pkill_rc": None,
+            "warning": str(exc),
+        }
     return {"ok": True, "driver_killed": killed, "pkill_rc": rc}
 
 
@@ -678,11 +720,28 @@ async def api_report(name: str) -> dict:
     d = EXPERIMENTS / name
     if not (d / "manifest.json").exists():
         raise HTTPException(404, "unknown experiment")
-    r = subprocess.run([sys.executable, "tools/cost_ablation/build_report.py",
-                        "--manifest", str(d / "manifest.json")],
-                       cwd=REPO, capture_output=True, text=True, timeout=900)
-    files = sorted(p.name for p in (d / "report").glob("*")) if (d / "report").exists() else []
-    return {"ok": r.returncode == 0, "output": (r.stdout + r.stderr)[-4000:], "files": files}
+    r = subprocess.run(
+        [
+            sys.executable,
+            "tools/cost_ablation/build_report.py",
+            "--manifest",
+            str(d / "manifest.json"),
+        ],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        timeout=900,
+    )
+    files = (
+        sorted(p.name for p in (d / "report").glob("*"))
+        if (d / "report").exists()
+        else []
+    )
+    return {
+        "ok": r.returncode == 0,
+        "output": (r.stdout + r.stderr)[-4000:],
+        "files": files,
+    }
 
 
 @app.get("/api/experiments/{name}/archive")
@@ -704,21 +763,27 @@ async def api_archive(name: str) -> StreamingResponse:
             z.write(driver, arcname=f"{name}/{driver.name}")
     buf.seek(0)
     return StreamingResponse(
-        buf, media_type="application/zip",
-        headers={"Content-Disposition": f'attachment; filename="{name}.zip"'})
+        buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{name}.zip"'},
+    )
 
 
 @app.get("/api/experiments/{name}/report/{filename}")
 async def api_report_file(name: str, filename: str) -> FileResponse:
     path = (EXPERIMENTS / name / "report" / filename).resolve()
-    if not path.is_file() or (EXPERIMENTS / name / "report").resolve() not in path.parents:
+    if (
+        not path.is_file()
+        or (EXPERIMENTS / name / "report").resolve() not in path.parents
+    ):
         raise HTTPException(404, "no such report file")
     return FileResponse(path)
 
 
 @app.get("/api/experiments/{name}/log/{stem}")
-async def api_log(name: str, stem: str, tail: int = 400, around: int = 0,
-                  ctx: int = 60, q: str = "") -> dict:
+async def api_log(
+    name: str, stem: str, tail: int = 400, around: int = 0, ctx: int = 60, q: str = ""
+) -> dict:
     """Log slice. `around` centres the window on a 1-indexed line (that's
     what an agent trace carries), `q` filters, otherwise it's the tail."""
     path = (EXPERIMENTS / name / f"{stem}.log").resolve()
@@ -728,17 +793,27 @@ async def api_log(name: str, stem: str, tail: int = 400, around: int = 0,
 
     if q:
         hits = [(i, ln) for i, ln in enumerate(lines, 1) if q.lower() in ln.lower()]
-        return {"stem": stem, "total": len(lines), "first_line": 0, "query": q,
-                "matches": len(hits),
-                "numbered": [{"n": i, "text": t} for i, t in hits[:tail]]}
+        return {
+            "stem": stem,
+            "total": len(lines),
+            "first_line": 0,
+            "query": q,
+            "matches": len(hits),
+            "numbered": [{"n": i, "text": t} for i, t in hits[:tail]],
+        }
 
     if around > 0:
         lo = max(0, around - ctx - 1)
         hi = min(len(lines), around + ctx)
     else:
         lo, hi = max(0, len(lines) - tail), len(lines)
-    return {"stem": stem, "total": len(lines), "first_line": lo + 1, "focus": around,
-            "numbered": [{"n": lo + i + 1, "text": t} for i, t in enumerate(lines[lo:hi])]}
+    return {
+        "stem": stem,
+        "total": len(lines),
+        "first_line": lo + 1,
+        "focus": around,
+        "numbered": [{"n": lo + i + 1, "text": t} for i, t in enumerate(lines[lo:hi])],
+    }
 
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -769,7 +844,9 @@ def _selftest() -> None:
         "2026-07-31 14:00:07.000 | INFO | x | [FetchMetrics] 7ac01e11 "
         "metrics={'fitness': '1.8571', 'is_valid': '1.0000'}\n"
     )
-    with tempfile.NamedTemporaryFile("w", suffix=".log", delete=False, encoding="utf-8") as f:
+    with tempfile.NamedTemporaryFile(
+        "w", suffix=".log", delete=False, encoding="utf-8"
+    ) as f:
         f.write(log)
         p = Path(f.name)
     try:
@@ -783,14 +860,18 @@ def _selftest() -> None:
         # -1 means "declined", so it must not be reported as a value
         assert ev[0]["levers"]["cold_start"] is None
         assert ev[1]["attempt"] == 3, ev[1]
-        assert set(ev[1]["moved"]) == {"cold_start", "growth_rate", "concurrency"}, ev[1]
+        assert set(ev[1]["moved"]) == {"cold_start", "growth_rate", "concurrency"}, ev[
+            1
+        ]
         assert ev[1]["levers"]["golden_ratio"] is None
         assert ev[1]["outliers"] == 2
         assert ev[1]["reason"] == "latency outliers dominate the bucket"
         # fitness comes off the same single pass, in evaluation order
         assert fit == [1.2424, 1.8571], fit
         # direction and target are read from the problem, not assumed
-        assert fitness_spec("alphaevolve/packing_circles/n_26")["higher_is_better"] is True
+        assert (
+            fitness_spec("alphaevolve/packing_circles/n_26")["higher_is_better"] is True
+        )
         assert fitness_spec("alphaevolve/packing_circles/n_26")["target"] == 2.635
         assert fitness_spec("alphaevolve/packing_circles/n_26")["sentinel"] == -1000.0
         mm = fitness_spec("alphaevolve/minimize_max_min_dist_ratio/2_dimensions")
@@ -806,13 +887,23 @@ def _selftest() -> None:
         # the new trace line: evidence + which tools fired, and it must win
         # over the plain adjustments line for the same wakeup
         trace = {
-            "attempt": 7, "mutant": 3, "trigger": "CI breach",
+            "attempt": 7,
+            "mutant": 3,
+            "trigger": "CI breach",
             "actions": ["adjust_model", "flag_as_outlier"],
-            "levers": {"cold_start_factor": -1, "golden_ratio": 1.2,
-                       "growth_rate_mult": -1, "concurrency_mult": 6.4},
-            "flag_outlier_indices": [0, 1], "skip_calibration": False,
+            "levers": {
+                "cold_start_factor": -1,
+                "golden_ratio": 1.2,
+                "growth_rate_mult": -1,
+                "concurrency_mult": 6.4,
+            },
+            "flag_outlier_indices": [0, 1],
+            "skip_calibration": False,
             "reasoning": "two slow calls dominate the bucket",
-            "evidence": {"get_progress": "attempts 7/100", "get_recent_calls": "#0 28s\n#1 31s"},
+            "evidence": {
+                "get_progress": "attempts 7/100",
+                "get_recent_calls": "#0 28s\n#1 31s",
+            },
         }
         trace_log = (
             "2026-07-31 16:00:00.000 | INFO | x | [MUTATION_ATTEMPTED] {}\n"
@@ -820,7 +911,9 @@ def _selftest() -> None:
             "2026-07-31 16:00:02.000 | INFO | x | [CostMonitorHook] adjustments: cold=-1 "
             "golden=1.2 growth=-1 conc=6.4 outliers=2 trigger='CI breach' reason=dup\n"
         )
-        with tempfile.NamedTemporaryFile("w", suffix=".log", delete=False, encoding="utf-8") as f:
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".log", delete=False, encoding="utf-8"
+        ) as f:
             f.write(trace_log)
             p2 = Path(f.name)
         try:
@@ -831,21 +924,23 @@ def _selftest() -> None:
             assert set(e["moved"]) == {"golden_ratio", "concurrency_mult"}, e
             assert e["levers"]["cold_start_factor"] is None, e
             assert e["actions"] == ["adjust_model", "flag_as_outlier"], e
-            assert e["outliers"] == 2 and e["evidence"]["get_progress"] == "attempts 7/100"
+            assert (
+                e["outliers"] == 2 and e["evidence"]["get_progress"] == "attempts 7/100"
+            )
         finally:
             p2.unlink(missing_ok=True)
 
-        # per-stage LLM totals, incl. the monitor's own calls — the whole point
-        # of the observer-overhead widget is that this stage is in there at all
         calls = (
-            '2026-07-31 17:00:00.000 | INFO | x | [LLM_CALL] '
+            "2026-07-31 17:00:00.000 | INFO | x | [LLM_CALL] "
             '{"stage": "MutationAgent", "latency_ms": 30000, "tokens_in": 3800, "tokens_out": 1000}\n'
-            '2026-07-31 17:00:01.000 | INFO | x | [LLM_CALL] '
+            "2026-07-31 17:00:01.000 | INFO | x | [LLM_CALL] "
             '{"stage": "CostMonitorAgent", "latency_ms": 280660, "tokens_in": 1101, "tokens_out": 39}\n'
-            '2026-07-31 17:00:02.000 | INFO | x | [LLM_CALL] '
+            "2026-07-31 17:00:02.000 | INFO | x | [LLM_CALL] "
             '{"stage": "MutationAgent", "latency_ms": 10000, "tokens_in": 100, "tokens_out": 10}\n'
         )
-        with tempfile.NamedTemporaryFile("w", suffix=".log", delete=False, encoding="utf-8") as f:
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".log", delete=False, encoding="utf-8"
+        ) as f:
             f.write(calls)
             p3 = Path(f.name)
         try:
@@ -854,7 +949,6 @@ def _selftest() -> None:
             assert st["MutationAgent"]["tokens"] == 4910, st
             assert st[OBSERVER_STAGE]["calls"] == 1, st
             assert st[OBSERVER_STAGE]["max_latency_ms"] == 280660, st
-            # the observer is a real share of measured latency, not a rounding error
             total = sum(v["latency_ms"] for v in st.values())
             assert st[OBSERVER_STAGE]["latency_ms"] / total > 0.8, st
         finally:
@@ -865,19 +959,19 @@ def _selftest() -> None:
 
         # preflight: a problem importing a module this env lacks must say so
         import tempfile as _tf
+
         d = Path(_tf.mkdtemp())
-        (d / "validate.py").write_text("import vllm_definitely_absent\nimport json\n", encoding="utf-8")
+        (d / "validate.py").write_text(
+            "import vllm_definitely_absent\nimport json\n", encoding="utf-8"
+        )
         assert missing_deps(d) == ["vllm_definitely_absent"], missing_deps(d)
-        # a problem's own modules are on sys.path at run time, not here — they
-        # are not a missing dependency, and 10 of 14 alphaevolve tasks said so
+        # Local problem modules must not be reported as missing dependencies.
         (d / "helper.py").write_text("import numpy\n", encoding="utf-8")
-        (d / "entrypoint.py").write_text("from helper import x\nfrom validate import y\n",
-                                         encoding="utf-8")
+        (d / "entrypoint.py").write_text(
+            "from helper import x\nfrom validate import y\n", encoding="utf-8"
+        )
         assert missing_deps(d) == ["vllm_definitely_absent"], missing_deps(d)
 
-        # budget mode: a probe log answers both questions, and a verdict is
-        # only "fits" when the TOP of the interval fits — a point estimate
-        # inside the budget with an interval spilling over is "tight".
         probe_log = "".join(
             f"2026-07-31 18:00:{i:02d}.000 | INFO | x | [LLM_CALL] "
             f'{{"stage": "MutationAgent", "endpoint": "", "model": "q", "ok": true, '
@@ -886,22 +980,30 @@ def _selftest() -> None:
             f'{{"mutant_id": "m{i}"}}\n'
             for i in range(10)
         )
-        with tempfile.NamedTemporaryFile("w", suffix=".log", delete=False, encoding="utf-8") as f:
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".log", delete=False, encoding="utf-8"
+        ) as f:
             f.write(probe_log)
             p4 = Path(f.name)
         try:
+
             def _probe(budget: int, attempts: int = 100):
-                return probe_answer(Probe(name="t", task="t", attempts=attempts,
-                                          budget_tokens=budget, proc=None, log=p4))
+                return probe_answer(
+                    Probe(
+                        name="t",
+                        task="t",
+                        attempts=attempts,
+                        budget_tokens=budget,
+                        proc=None,
+                        log=p4,
+                    )
+                )
 
             a = _probe(10_000_000)
             assert a["observed_attempts"] == 10, a
             assert a["ci"][0] <= a["predicted_tokens"] <= a["ci"][1], a
             assert a["verdict"] == "fits", a
-            # 10 attempts x 3500 tokens -> ~35k observed, ~350k projected to 100
             assert 200_000 < a["predicted_tokens"] < 600_000, a
-            # one range, low end first, and the quartile band is NARROWER than
-            # the 90% interval — that is the whole reason budget mode quotes it
             n_lo, n_hi = a["affordable"]
             assert 0 < n_lo <= n_hi, a
 
@@ -914,8 +1016,19 @@ def _selftest() -> None:
             t_lo, t_hi = tight["affordable"]
             assert 0 < t_lo <= t_hi, tight
 
-            assert probe_answer(Probe(name="t", task="t", attempts=100, budget_tokens=1,
-                                      proc=None, log=Path("/nope.log"))) is None
+            assert (
+                probe_answer(
+                    Probe(
+                        name="t",
+                        task="t",
+                        attempts=100,
+                        budget_tokens=1,
+                        proc=None,
+                        log=Path("/nope.log"),
+                    )
+                )
+                is None
+            )
         finally:
             p4.unlink(missing_ok=True)
         print("selftest OK")

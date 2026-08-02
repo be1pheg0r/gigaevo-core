@@ -39,8 +39,13 @@ def max_radii(centers: np.ndarray) -> np.ndarray:
     rows[np.arange(iu[0].size), iu[0]] = 1.0
     rows[np.arange(iu[1].size), iu[1]] = 1.0
 
-    res = linprog(c=-np.ones(n), A_ub=rows, b_ub=d,
-                  bounds=list(zip(np.zeros(n), upper)), method="highs")
+    res = linprog(
+        c=-np.ones(n),
+        A_ub=rows,
+        b_ub=d,
+        bounds=list(zip(np.zeros(n), upper)),
+        method="highs",
+    )
     if not res.success:
         return np.zeros(n)
     # The LP is solved to a tolerance, so nudge off the boundary: validate.py
@@ -72,8 +77,12 @@ def demo() -> None:
         r = max_radii(centers)
         assert r.shape == (n,) and np.all(r >= 0) and np.all(np.isfinite(r))
         # Containment.
-        assert np.all(centers[:, 0] - r >= -1e-6) and np.all(centers[:, 0] + r <= 1 + 1e-6)
-        assert np.all(centers[:, 1] - r >= -1e-6) and np.all(centers[:, 1] + r <= 1 + 1e-6)
+        assert np.all(centers[:, 0] - r >= -1e-6) and np.all(
+            centers[:, 0] + r <= 1 + 1e-6
+        )
+        assert np.all(centers[:, 1] - r >= -1e-6) and np.all(
+            centers[:, 1] + r <= 1 + 1e-6
+        )
         # Non-overlap.
         if n > 1:
             iu = np.triu_indices(n, k=1)

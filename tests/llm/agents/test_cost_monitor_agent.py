@@ -5,6 +5,7 @@ observability tools were named in the prompt but never inlined into it, and
 `concurrency_mult` was advertised as the only lever on the divisor while
 `parse_response` silently dropped it.
 """
+
 from __future__ import annotations
 
 from gigaevo.llm.agents.cost_monitor import (
@@ -29,13 +30,35 @@ def _agent(tools: _ToolSet) -> CostMonitorAgent:
 def _tools(**kw) -> _ToolSet:
     base = dict(
         recent_calls=[
-            LlmCallRecord(index=0, tokens_in=3800, tokens_out=900, latency_ms=27_000, stage="MutationAgent"),
-            LlmCallRecord(index=1, tokens_in=3900, tokens_out=950, latency_ms=28_000, stage="MutationAgent"),
-            LlmCallRecord(index=2, tokens_in=3850, tokens_out=2842, latency_ms=350_000, stage="MutationAgent"),
+            LlmCallRecord(
+                index=0,
+                tokens_in=3800,
+                tokens_out=900,
+                latency_ms=27_000,
+                stage="MutationAgent",
+            ),
+            LlmCallRecord(
+                index=1,
+                tokens_in=3900,
+                tokens_out=950,
+                latency_ms=28_000,
+                stage="MutationAgent",
+            ),
+            LlmCallRecord(
+                index=2,
+                tokens_in=3850,
+                tokens_out=2842,
+                latency_ms=350_000,
+                stage="MutationAgent",
+            ),
         ],
         trigger_reason="estimate jumped above its own interval at attempt 20",
-        elapsed_s=715.0, attempts_done=20, max_mutants=100,
-        predicted_duration_s=13_109.0, achieved_concurrency=7.2, max_in_flight=8,
+        elapsed_s=715.0,
+        attempts_done=20,
+        max_mutants=100,
+        predicted_duration_s=13_109.0,
+        achieved_concurrency=7.2,
+        max_in_flight=8,
     )
     base.update(kw)
     return _ToolSet(**base)
@@ -43,14 +66,20 @@ def _tools(**kw) -> _ToolSet:
 
 class TestEveryToolReachesTheModel:
     def test_prompt_carries_trigger_progress_and_last_outcome(self) -> None:
-        t = _tools(last_adjustment={
-            "attempt": 8, "golden": 1.2, "growth": -1.0, "concurrency": -1.0,
-            "outliers": 1, "reasoning": "one slow call",
-            "predicted_duration_s": 3251.0, "elapsed_s": 321.0,
-        })
+        t = _tools(
+            last_adjustment={
+                "attempt": 8,
+                "golden": 1.2,
+                "growth": -1.0,
+                "concurrency": -1.0,
+                "outliers": 1,
+                "reasoning": "one slow call",
+                "predicted_duration_s": 3251.0,
+                "elapsed_s": 321.0,
+            }
+        )
         text = _agent(t).build_prompt({"messages": []})[1].content
 
-        # the three that used to be missing
         assert "jumped above its own interval at attempt 20" in text
         assert "attempts=20/100" in text
         assert "achieved_concurrency" in text
@@ -65,7 +94,9 @@ class TestEveryToolReachesTheModel:
         tools are not callable, so anything named must be in the user turn."""
         text = _agent(_tools()).build_prompt({"messages": []})[1].content
         for tool in ("get_last_adjustment_outcome",):
-            assert tool in SYSTEM_PROMPT, f"{tool} no longer referenced — update this test"
+            assert tool in SYSTEM_PROMPT, (
+                f"{tool} no longer referenced — update this test"
+            )
         assert "WHY YOU ARE AWAKE" in text
         assert "YOUR PREVIOUS DECISION" in text
 
@@ -75,8 +106,13 @@ class TestCauseChoosesTheLever:
 
     def test_servers_reaches_the_divisor_and_nothing_else(self) -> None:
         a = _agent(_tools())
-        out = a.parse_response({"llm_response": _Resp(
-            '{"cause": "servers", "magnitude": 0.8, "reasoning": "contention"}')})
+        out = a.parse_response(
+            {
+                "llm_response": _Resp(
+                    '{"cause": "servers", "magnitude": 0.8, "reasoning": "contention"}'
+                )
+            }
+        )
         adj = out["cost_adjustments"]
         assert adj["concurrency_mult"] == 0.8
         assert adj["golden_ratio"] == -1, "must not silently reach for the wrong lever"
@@ -84,25 +120,46 @@ class TestCauseChoosesTheLever:
         assert adj["cause"] == "servers"
 
     def test_programs_reaches_the_growth_rate(self) -> None:
-        out = _agent(_tools()).parse_response({"llm_response": _Resp(
-            '{"cause": "programs", "magnitude": 1.4, "sustained_over_calls": 7}')})
+        out = _agent(_tools()).parse_response(
+            {
+                "llm_response": _Resp(
+                    '{"cause": "programs", "magnitude": 1.4, "sustained_over_calls": 7}'
+                )
+            }
+        )
         adj = out["cost_adjustments"]
         assert adj["growth_rate_mult"] == 1.4 and adj["concurrency_mult"] == -1
         assert adj["sustained_over_calls"] == 7
 
     def test_task_reaches_the_flat_margin(self) -> None:
-        out = _agent(_tools()).parse_response({"llm_response": _Resp(
-            '{"cause": "task", "magnitude": 1.3, "sustained_over_calls": 9}')})
+        out = _agent(_tools()).parse_response(
+            {
+                "llm_response": _Resp(
+                    '{"cause": "task", "magnitude": 1.3, "sustained_over_calls": 9}'
+                )
+            }
+        )
         assert out["cost_adjustments"]["golden_ratio"] == 1.3
 
     def test_noise_moves_nothing(self) -> None:
-        adj = _agent(_tools()).parse_response({"llm_response": _Resp(
-            '{"cause": "noise", "magnitude": -1, "reasoning": "one spike"}')})["cost_adjustments"]
-        assert adj["golden_ratio"] == adj["growth_rate_mult"] == adj["concurrency_mult"] == -1
+        adj = _agent(_tools()).parse_response(
+            {
+                "llm_response": _Resp(
+                    '{"cause": "noise", "magnitude": -1, "reasoning": "one spike"}'
+                )
+            }
+        )["cost_adjustments"]
+        assert (
+            adj["golden_ratio"]
+            == adj["growth_rate_mult"]
+            == adj["concurrency_mult"]
+            == -1
+        )
 
     def test_an_unknown_cause_is_read_as_noise(self) -> None:
-        adj = _agent(_tools()).parse_response({"llm_response": _Resp(
-            '{"cause": "solar flares", "magnitude": 2.0}')})["cost_adjustments"]
+        adj = _agent(_tools()).parse_response(
+            {"llm_response": _Resp('{"cause": "solar flares", "magnitude": 2.0}')}
+        )["cost_adjustments"]
         assert adj["cause"] == "noise"
         assert adj["concurrency_mult"] == -1
 
@@ -113,8 +170,9 @@ class TestCauseChoosesTheLever:
 
     def test_out_of_range_values_are_refused(self) -> None:
         a = _agent(_tools())
-        out = a.parse_response({"llm_response": _Resp(
-            '{"cause": "servers", "magnitude": 42}')})
+        out = a.parse_response(
+            {"llm_response": _Resp('{"cause": "servers", "magnitude": 42}')}
+        )
         assert out["cost_adjustments"]["concurrency_mult"] == -1
 
 
@@ -125,7 +183,11 @@ class TestOutlierMarkerTracksLatency:
         table = _tools().get_recent_calls(10)
         spike = [ln for ln in table.splitlines() if ln.startswith("#2 ")][0]
         assert "SLOW" in spike
-        assert all("SLOW" not in ln for ln in table.splitlines() if ln.startswith(("#0 ", "#1 ")))
+        assert all(
+            "SLOW" not in ln
+            for ln in table.splitlines()
+            if ln.startswith(("#0 ", "#1 "))
+        )
 
     def test_already_flagged_calls_say_so(self) -> None:
         table = _tools(already_flagged=[2]).get_recent_calls(10)

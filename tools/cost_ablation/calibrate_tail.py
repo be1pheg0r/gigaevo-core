@@ -1,45 +1,23 @@
 #!/usr/bin/env python3
-"""How much of the estimator's error is a CONSTANT, and how much is per-task?
-
-This is the question that decides what the cost-monitor agent can possibly be
-for. The estimator under-predicts; a fixed multiplier on the remaining term
-removes the median of that. What a fixed multiplier can never remove is the
-SPREAD between tasks — and per-task adaptation is exactly what an agent can do
-and a constant cannot.
-
-For every log and every progress checkpoint this computes the multiplier that
-would have made the estimate exact:
+"""Calibrate the remaining-work multiplier from replayed logs.
 
     m* = (actual_duration - elapsed) / (predicted_duration - elapsed)
 
-i.e. how much the remaining term should have been scaled by. Then:
-
-  * median(m*) over tasks  -> the calibration constant, free to apply
-  * spread of m* over tasks -> the headroom no constant can reach
-
-Split-half validation says whether the constant generalises or is fitted to
-the logs it was measured on.
-
-Raw events are what this reads, so pre-2026-08-01 logs are fine: the
-double-CostMonitorHook bug duplicated the derived [CostMonitorHookJSON]
-lines, never the [LLM_CALL]/[MUTATION_ATTEMPTED] stream underneath.
-
-Usage:
-    python3 tools/cost_ablation/calibrate_tail.py experiments/*/*noagent*.log
+Reports the median multiplier and its cross-run spread at each checkpoint.
 """
+
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 import statistics as st
 import sys
-from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from loguru import logger
-
 from replay_from_log import replay_log  # noqa: E402
 
 CHECKPOINTS = (0.10, 0.25, 0.50)
@@ -65,13 +43,16 @@ def ideal_multipliers(res: dict) -> dict[float, float]:
 def summarise(name: str, ms: list[float]) -> str:
     ms = sorted(ms)
     q1, q3 = ms[len(ms) // 4], ms[(3 * len(ms)) // 4]
-    return (f"{name:>7} n={len(ms):<3} медиана {st.median(ms):5.2f}  "
-            f"IQR [{q1:.2f}, {q3:.2f}]  разброс {ms[0]:.2f}..{ms[-1]:.2f}")
+    return (
+        f"{name:>7} n={len(ms):<3} медиана {st.median(ms):5.2f}  "
+        f"IQR [{q1:.2f}, {q3:.2f}]  разброс {ms[0]:.2f}..{ms[-1]:.2f}"
+    )
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("logs", nargs="+", type=Path)
     args = ap.parse_args()
     logger.remove()
@@ -100,16 +81,20 @@ def main() -> None:
             print(summarise(f"{p:.0%}", per_cp[p]))
 
     print("\n=== что снимает константа, а что нет ===")
-    print(f"{'прогресс':>9} {'|err| как есть':>15} {'|err| после константы':>22} {'остаток':>10}")
+    print(
+        f"{'прогресс':>9} {'|err| как есть':>15} {'|err| после константы':>22} {'остаток':>10}"
+    )
     for p in CHECKPOINTS:
         ms = per_cp[p]
         if len(ms) < 4:
             continue
         k = st.median(ms)
-        raw = [abs(1 - m) * 100 for m in ms]              # error with no correction
-        left = [abs(1 - m / k) * 100 for m in ms]          # error after the constant
-        print(f"{p:>9.0%} {st.median(raw):>14.1f}% {st.median(left):>21.1f}% "
-              f"{st.median(left) / max(st.median(raw), 1e-9):>9.0%}")
+        raw = [abs(1 - m) * 100 for m in ms]  # error with no correction
+        left = [abs(1 - m / k) * 100 for m in ms]  # error after the constant
+        print(
+            f"{p:>9.0%} {st.median(raw):>14.1f}% {st.median(left):>21.1f}% "
+            f"{st.median(left) / max(st.median(raw), 1e-9):>9.0%}"
+        )
 
     print("\n=== переносится ли константа на другие логи (split-half) ===")
     for p in CHECKPOINTS:
@@ -121,8 +106,10 @@ def main() -> None:
         ka, kb = st.median(a), st.median(b)
         cross = st.median([abs(1 - m / ka) * 100 for m in b])
         own = st.median([abs(1 - m / kb) * 100 for m in b])
-        print(f"{p:>9.0%} константа A={ka:.2f} B={kb:.2f} | "
-              f"на чужой половине {cross:.1f}%, на своей {own:.1f}%")
+        print(
+            f"{p:>9.0%} константа A={ka:.2f} B={kb:.2f} | "
+            f"на чужой половине {cross:.1f}%, на своей {own:.1f}%"
+        )
 
 
 if __name__ == "__main__":

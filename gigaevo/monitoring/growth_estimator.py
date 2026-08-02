@@ -130,7 +130,9 @@ class RobustPowerLaw:
         return max(0.0, self.a / (self.b + 1) * ((n + 1) ** (self.b + 1) - 1))
 
 
-def fit_ttft_tpot(tokens_out: list[float], latency_ms: list[float]) -> tuple[float, float]:
+def fit_ttft_tpot(
+    tokens_out: list[float], latency_ms: list[float]
+) -> tuple[float, float]:
     """Fit latency_ms = ttft + tpot * tokens_out (OLS).
 
     The physical model behind LLM decode latency: a roughly-constant
@@ -187,10 +189,14 @@ class EnsembleLaw:
         return cls(linear, power, w_linear, 1.0 - w_linear, n)
 
     def value_at(self, i: float) -> float:
-        return self.w_linear * self.linear.value_at(i) + self.w_power * self.power.value_at(i)
+        return self.w_linear * self.linear.value_at(
+            i
+        ) + self.w_power * self.power.value_at(i)
 
     def integral(self, n: float) -> float:
-        return self.w_linear * self.linear.integral(n) + self.w_power * self.power.integral(n)
+        return self.w_linear * self.linear.integral(
+            n
+        ) + self.w_power * self.power.integral(n)
 
 
 def _bounded_integral(law, values: list[float], n: float) -> float:
@@ -211,37 +217,14 @@ def _bounded_integral(law, values: list[float], n: float) -> float:
     return min(raw, cap) if cap > 0 else raw
 
 
-def tail_integral(law, values: list[float], n: float,
-                  fit_values: list[float] | None = None) -> float:
-    """Extrapolate ONLY the unobserved tail (buckets ``len(values)``..``n``).
+def tail_integral(
+    law, values: list[float], n: float, fit_values: list[float] | None = None
+) -> float:
+    """Extrapolate only the unobserved tail.
 
-    Two biases this removes, both measured on the 9 collected 100-mutant runs
-    (tools/cost_ablation, 2026-07-31):
-
-    1. *Re-predicting the past.* ``_bounded_integral`` fits a law to the
-       observed buckets and then integrates from zero, so the already-observed
-       part is replaced by the fit's own (lossy) reconstruction of it. On real
-       logs the final token estimate came out BELOW the sum the estimator had
-       already watched go by. Taking ``sum(values)`` as ground truth and
-       predicting only what is left makes the estimate monotonically
-       self-correcting and guarantees ``pred >= observed``.
-    2. *Retransformation bias.* PowerLaw/RobustPowerLaw fit in log space, so
-       exponentiating recovers the GEOMETRIC mean (Theil-Sen: the median);
-       what we extrapolate is a SUM, which needs the ARITHMETIC mean. For
-       right-skewed token/latency buckets the geometric mean sits well below
-       it — a systematic ~-20% undercount. Duan's smearing estimator fixes
-       this: rescale the law by the factor that makes it reproduce the
-       observed sum in-sample, then extrapolate with that scale.
-
-    Measured effect (median |error| of the final token estimate across the 9
-    runs): 22% -> 13%, and residual error then equals exactly the share of
-    tokens the LLM_CALL event stream misses, nothing else.
-
-    ``fit_values``: same-length series with outlier buckets replaced by the
-    median of the rest (see CostMonitorHook._winsorised). The tail is shaped
-    by ``fit_values`` — a transient spike must not be extrapolated over the
-    whole remaining run — while ``values`` still anchors the already-observed
-    part, because the outlier's cost was genuinely incurred.
+    The observed sum remains the anchor. The fitted law is rescaled with
+    Duan's smearing correction. ``fit_values`` may suppress outliers for the
+    tail fit without removing their incurred cost from ``values``.
     """
     k = len(values)
     if k == 0 or n <= k:
@@ -254,16 +237,17 @@ def tail_integral(law, values: list[float], n: float,
             scale = min(max(sum(fv) / in_sample, 0.2), 5.0)  # Duan smearing
     tail = (law.integral(n) - law.integral(k)) * scale
     flat = (sum(fv) / k) * (n - k)  # no-growth backstop, see _bounded_integral
-    # Cap the tail at a multiple of the flat projection, tightened while
-    # evidence is thin: a power law fitted on ~10 buckets and extrapolated to
-    # 100 can multiply by (100/10)^2 on nothing but noise. Relaxes back to the
-    # old generous 8x ceiling once enough buckets support the trend.
+    # Tighten the cap while evidence for the fitted trend is sparse.
     cap_mult = 1.5 + 6.5 * k / (k + 20)
     return min(max(tail, 0.0), flat * cap_mult)
 
 
 def _resample_tail_totals(
-    law_cls: type, values: list[float], n: float, noise_fn, n_iter: int,
+    law_cls: type,
+    values: list[float],
+    n: float,
+    noise_fn,
+    n_iter: int,
     rng: np.random.Generator,
 ) -> np.ndarray:
     """Shared driver for the resampling-based CI methods below: refit
@@ -286,8 +270,13 @@ def _resample_tail_totals(
 
 
 def tail_ci_bootstrap(
-    law_cls: type, values: list[float], n: float, *,
-    n_iter: int = 200, alpha: float = 0.1, rng: np.random.Generator | None = None,
+    law_cls: type,
+    values: list[float],
+    n: float,
+    *,
+    n_iter: int = 200,
+    alpha: float = 0.1,
+    rng: np.random.Generator | None = None,
 ) -> tuple[float, float]:
     """Residual-bootstrap CI for the anchored total (observed sum + tail).
 
@@ -304,16 +293,25 @@ def tail_ci_bootstrap(
         return (total_point, total_point)
     rng = rng or np.random.default_rng(0)
     totals = _resample_tail_totals(
-        law_cls, values, n,
+        law_cls,
+        values,
+        n,
         lambda resid, r: r.choice(resid, size=len(resid), replace=True),
-        n_iter, rng)
+        n_iter,
+        rng,
+    )
     lo, hi = np.percentile(totals, [100 * alpha / 2, 100 * (1 - alpha / 2)])
     return float(max(lo, total_point)), float(max(hi, total_point))
 
 
 def tail_ci_montecarlo(
-    law_cls: type, values: list[float], n: float, *,
-    n_iter: int = 200, alpha: float = 0.1, rng: np.random.Generator | None = None,
+    law_cls: type,
+    values: list[float],
+    n: float,
+    *,
+    n_iter: int = 200,
+    alpha: float = 0.1,
+    rng: np.random.Generator | None = None,
 ) -> tuple[float, float]:
     """Parametric Monte Carlo CI: assumes in-sample residuals are i.i.d.
     Normal(0, sigma) (sigma estimated from those residuals), draws fresh
@@ -331,15 +329,23 @@ def tail_ci_montecarlo(
     fitted0 = np.array([law0.value_at(i) for i in range(k)])
     sigma = float(np.std(np.asarray(values, dtype=float) - fitted0)) or 1e-6
     totals = _resample_tail_totals(
-        law_cls, values, n,
+        law_cls,
+        values,
+        n,
         lambda resid, r: r.normal(0.0, sigma, size=len(resid)),
-        n_iter, rng)
+        n_iter,
+        rng,
+    )
     lo, hi = np.percentile(totals, [100 * alpha / 2, 100 * (1 - alpha / 2)])
     return float(max(lo, total_point)), float(max(hi, total_point))
 
 
 def tail_ci_bayesian(
-    law_cls: type, values: list[float], n: float, *, alpha: float = 0.1,
+    law_cls: type,
+    values: list[float],
+    n: float,
+    *,
+    alpha: float = 0.1,
 ) -> tuple[float, float]:
     """Closed-form Bayesian CI for the anchored total.
 
@@ -361,7 +367,7 @@ def tail_ci_bayesian(
     resid = np.asarray(values, dtype=float) - fitted
     a0, b0 = 1.0, max(float(np.var(resid)), 1.0)
     a_n = a0 + k / 2.0
-    b_n = b0 + 0.5 * float(np.sum(resid ** 2))
+    b_n = b0 + 0.5 * float(np.sum(resid**2))
     remaining = n - k
     tail_point = tail_integral(law, values, n)
     scale = math.sqrt(b_n / a_n * (1.0 + 1.0 / k) * remaining)
@@ -378,8 +384,9 @@ CI_METHODS = {
 }
 
 
-def relative_tail_width(ci_method: str, law_cls: type, values: list[float], n: float,
-                        alpha: float = 0.1) -> float:
+def relative_tail_width(
+    ci_method: str, law_cls: type, values: list[float], n: float, alpha: float = 0.1
+) -> float:
     """Turn one of :data:`CI_METHODS`' absolute (lo, hi) bands into a
     relative half-width comparable to :func:`confidence_width`'s role, so
     any of the three probabilistic methods can be swapped in wherever the
@@ -404,13 +411,7 @@ def relative_tail_width(ci_method: str, law_cls: type, values: list[float], n: f
 
 
 def confidence_width(n_points: int) -> float:
-    """Relative half-width of the prediction interval. Shrinks as evidence
-    accumulates; wide by default so a 1-2 point fit doesn't claim precision
-    it doesn't have.
-
-    ponytail: 1/sqrt(n) heuristic, not a real prediction interval — swap
-    if validation shows it's too loose/tight.
-    """
+    """Return a bounded 1/sqrt(n) heuristic interval half-width."""
     return max(0.15, min(1.0, 1.0 / math.sqrt(max(n_points, 1))))
 
 
@@ -439,7 +440,9 @@ def estimate(
     latency_law = law_cls.fit(latency_ms_per_call)
 
     total_tokens = _bounded_integral(token_law, tokens_per_call, total_calls)
-    total_latency_s = _bounded_integral(latency_law, latency_ms_per_call, total_calls) / 1000.0
+    total_latency_s = (
+        _bounded_integral(latency_law, latency_ms_per_call, total_calls) / 1000.0
+    )
     duration_s = total_latency_s / max(max_in_flight, 1)
 
     w_tok = confidence_width(token_law.n_points)
@@ -495,7 +498,9 @@ def estimate_by_stage(
         tok_law = law_cls.fit(fit_tok)
         lat_law = law_cls.fit(fit_lat)
         tok_total = sum(tokens) + tail_integral(tok_law, tokens, n, fit_tok)
-        lat_total_s = (sum(latency) + tail_integral(lat_law, latency, n, fit_lat)) / 1000.0
+        lat_total_s = (
+            sum(latency) + tail_integral(lat_law, latency, n, fit_lat)
+        ) / 1000.0
         if ci_method:
             w_tok = relative_tail_width(ci_method, law_cls, fit_tok, n, ci_alpha)
             w_lat = relative_tail_width(ci_method, law_cls, fit_lat, n, ci_alpha)
@@ -516,7 +521,10 @@ def estimate_by_stage(
         predicted_total_tokens=total_tokens,
         predicted_duration_s=duration_s,
         tokens_ci=(tok_ci_lo, tok_ci_hi),
-        duration_ci=(lat_ci_lo_s / max(max_in_flight, 1), lat_ci_hi_s / max(max_in_flight, 1)),
+        duration_ci=(
+            lat_ci_lo_s / max(max_in_flight, 1),
+            lat_ci_hi_s / max(max_in_flight, 1),
+        ),
         n_points=n_points,
     )
 
@@ -530,26 +538,9 @@ def achieved_concurrency(
     min_window_s: float = 300.0,
     shrink_k: int = 80,
 ) -> float:
-    """How many LLM calls the system is ACTUALLY running at once, measured as
-    service-time-per-wall-second over a trailing window.
+    """Estimate achieved concurrency as service time per trailing wall time.
 
-    ``max_in_flight`` is the DAG's mutant-dispatch cap, not the LLM
-    concurrency: one mutant DAG issues several LLM calls that overlap, and
-    conversely a low-accept-rate or slow-validator task never fills the pool.
-    Measured on the 9 collected runs the true value ranged from 4.2 to 14.5
-    against a constant ``max_in_flight=8`` — and Little's Law divided by 8
-    reproduced the whole observed duration-error spread (-47%..+80%) on its
-    own. Nothing else in the duration model was materially wrong.
-
-    Measured over a trailing window rather than from t0, because the run ramps
-    up and a cumulative average never lives that cold start down. Shrunk
-    toward ``max_in_flight`` while call evidence is thin, so the first few
-    calls (when the ramp reads as near-zero concurrency) can't blow the
-    estimate up. ``shrink_k`` / ``min_window_s`` were swept on those 9 runs;
-    80 / 300s minimised error at 25% and 50% progress without hurting the
-    final estimate.
-
-    ``calls``: ``(completion_time_s, latency_ms)`` for every call so far.
+    Sparse observations are shrunk toward the dispatch-cap prior.
     """
     if not calls:
         return float(max_in_flight)
@@ -585,39 +576,11 @@ def estimate_duration_by_stage(
     ci_method: str | None = None,
     width_scale: float = 1.0,
 ) -> tuple[float, tuple[float, float]]:
-    """Predict total wall-clock duration via the TTFT+TPOT physical model
-    (:func:`fit_ttft_tpot`) per stage instead of fitting latency itself as
-    a growth law over call index — latency doesn't follow a growth trend
-    in this system (dominated by backpressure noise, r≈0.23 with call
-    index vs r≈0.57 with tokens_out); see :func:`fit_ttft_tpot`.
+    """Predict anchored wall-clock duration with per-stage TTFT/TPOT models.
 
-    ``nonllm_duration_by_stage``: bucketed wall-clock duration_ms for
-    non-LLM pipeline stages (e.g. CallValidatorFunction, CallProgramFunction)
-    that the LLM-latency model above never sees. Historical validation
-    (2026-07-27 cost-model report, 21 real runs) found these dominate 42-94%
-    of wall time on some tasks, and LLM-latency-only duration estimates
-    underestimate systematically as a result (-33% median bias measured
-    there). Fit directly as a growth law over duration_ms (no tokens_out
-    concept applies to a validator/executor stage) and folded into the same
-    Little's Law division as the LLM contribution below, not a second one.
-
-    ``elapsed_s`` / ``concurrency``: the estimate is ANCHORED — wall time
-    already spent is known exactly, so only the REMAINING service time is
-    predicted, and it is divided by the concurrency the system is actually
-    achieving (see :func:`achieved_concurrency`) rather than by the
-    ``max_in_flight`` dispatch cap. ``concurrency=None`` falls back to
-    ``max_in_flight`` (old behaviour).
-
-    ``tail_mult``: CostMonitorAgent's calibration multiplier. Applied to the
-    remaining-work term only — scaling the elapsed term too would let the
-    agent "correct" wall time that has already been measured.
-
-    ``ci_method``: swaps the 1/sqrt(n) heuristic width for one of
-    :data:`CI_METHODS` (via :func:`relative_tail_width`), weighted by each
-    stage's share of the remaining service time. ``None`` (default) keeps
-    the exact original heuristic behaviour.
-
-    Returns ``(duration_s, (ci_low_s, ci_high_s))``.
+    Non-LLM stages are fitted directly from duration buckets. Only remaining
+    service time is divided by achieved concurrency and scaled by
+    ``tail_mult``. ``ci_method`` selects the tail-width estimator.
     """
     remaining_ms = 0.0
     n_points = 0
@@ -642,25 +605,33 @@ def estimate_duration_by_stage(
         stage_remaining_ms = ttft * (n - k) + tpot * tail_out
         remaining_ms += stage_remaining_ms
         if ci_method:
-            weighted_w_num += relative_tail_width(ci_method, token_law_cls, fit_out, n) * stage_remaining_ms
+            weighted_w_num += (
+                relative_tail_width(ci_method, token_law_cls, fit_out, n)
+                * stage_remaining_ms
+            )
 
     for stage, durations in (nonllm_duration_by_stage or {}).items():
         n = total_units_by_stage.get(stage, len(durations))
         fit_dur = (fit_nonllm_by_stage or {}).get(stage, durations)
-        stage_remaining_ms = tail_integral(nonllm_law_cls.fit(fit_dur), durations, n, fit_dur)
+        stage_remaining_ms = tail_integral(
+            nonllm_law_cls.fit(fit_dur), durations, n, fit_dur
+        )
         remaining_ms += stage_remaining_ms
         n_points += len(durations)
         if ci_method:
-            weighted_w_num += relative_tail_width(ci_method, nonllm_law_cls, fit_dur, n) * stage_remaining_ms
+            weighted_w_num += (
+                relative_tail_width(ci_method, nonllm_law_cls, fit_dur, n)
+                * stage_remaining_ms
+            )
 
     conc = concurrency if concurrency and concurrency > 0 else max(max_in_flight, 1)
     duration_s = max(0.0, elapsed_s + remaining_ms * tail_mult / 1000.0 / conc)
-    w = (weighted_w_num / remaining_ms) if (ci_method and remaining_ms > 0) else confidence_width(n_points)
-    # ``width_scale`` is the online calibration factor (see
-    # CostMonitorHook._update_aci): every width here is a model-based guess at
-    # how wrong the tail could be, and on the collected runs those guesses
-    # covered the truth 64-68% of the time while aiming at 90%. The scale is
-    # driven by observed miscoverage rather than by a better model of the tail.
+    w = (
+        (weighted_w_num / remaining_ms)
+        if (ci_method and remaining_ms > 0)
+        else confidence_width(n_points)
+    )
+    # Online calibration scales uncertainty in the predicted tail.
     w *= max(width_scale, 0.0)
     # Only the predicted part carries uncertainty; elapsed time is measured.
     half = (duration_s - elapsed_s) * w

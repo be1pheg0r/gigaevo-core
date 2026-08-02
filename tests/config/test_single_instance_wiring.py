@@ -1,23 +1,4 @@
-"""One object per stateful node, not two.
-
-``instantiate(cfg, _recursive_=True)`` builds a ``_target_`` dict wherever it
-finds one. A plain ``${node}`` interpolation copies the *config* into the
-consumer, so the node is built twice: once as the top-level definition, once
-inside whoever referenced it. For a pure value object that is waste; for a
-node that subscribes to the global event bus in ``__init__`` it is a bug.
-
-Measured on the 2026-07-31 ablations before the fix: two live
-``CostMonitorHook`` instances per run, each flushing its own
-``[CostMonitorHookJSON]`` line for the same ``(mutant, attempts)``, each
-running its own ACI update and its own agent budget — 28% of agent wakeups
-were the twin handling an attempt the other had already handled, with two
-``CostMonitorAgent`` LLM calls dispatched ~6 ms apart returning different
-decisions.
-
-``${ref:node}`` (gigaevo/config/resolvers.py) instantiates once and writes the
-instance back into the config, so every later reference — and the top-level
-walk itself — sees the same object.
-"""
+"""Verify that stateful config references resolve to one shared instance."""
 
 from __future__ import annotations
 
@@ -58,10 +39,12 @@ def _build(reference: str) -> tuple[int, bool]:
     """
     register_resolvers()
     _Counted.built.clear()
-    cfg = OmegaConf.create({
-        "node": {"_target_": f"{__name__}._Counted", "x": 1},
-        "consumer": {"_target_": "builtins.dict", "node": reference},
-    })
+    cfg = OmegaConf.create(
+        {
+            "node": {"_target_": f"{__name__}._Counted", "x": 1},
+            "consumer": {"_target_": "builtins.dict", "node": reference},
+        }
+    )
     out = instantiate(cfg, _recursive_=True)
     shared = out["consumer"]["node"] is out["node"]
     return len(_Counted.built), shared

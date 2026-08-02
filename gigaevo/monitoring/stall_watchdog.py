@@ -1,20 +1,4 @@
-"""Detects a permanently stalled run and stops it early instead of burning
-the full run timeout doing nothing.
-
-A run can enter a state where the initial seed program(s) fail validation
-and every island's elite archive stays empty forever — parent selection
-then returns zero parents every cycle, nothing new is ever generated to
-try again, and there is no natural end condition. This is not a rare edge
-case: on 2026-07-30 it hit alphaevolve/matrix_multiplication, algotune_lqr,
-and chains/nlp/gsm8k/static in the same multi-domain sweep, each spinning
-for its full timeout (30-60 min) with zero mutants ever accepted and zero
-LLM calls in flight.
-
-``post_step_hook`` cannot see this — it only fires when a program IS
-added (see ingestor.py), which never happens in a stall. This instead
-follows the eta_ticker/live_frontier_compare pattern: an independent
-daemon thread polling the engine's own in-memory counters.
-"""
+"""Stop runs whose mutation counter remains stalled beyond a timeout."""
 
 from __future__ import annotations
 

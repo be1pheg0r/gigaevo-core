@@ -1,48 +1,20 @@
 #!/usr/bin/env python3
-"""Compare confidence-interval construction methods for the cost model on
-the 9 collected logs, offline (no LLM budget, no evolution run).
+"""Compare interval coverage and relative width across replay methods."""
 
-Replays each log once (fast, deterministic point estimate unaffected), and
-at progress checkpoints [10%, 25%, 50%, final] recomputes tokens_ci /
-duration_ci four ways: the current 1/sqrt(n) heuristic
-(growth_estimator.confidence_width, flagged there as a "swap if validation
-shows it's too loose/tight" placeholder) versus the three probabilistic
-alternatives added alongside it — tail_ci_bootstrap (residual bootstrap),
-tail_ci_montecarlo (parametric Gaussian Monte Carlo), tail_ci_bayesian
-(closed-form Normal-Inverse-Gamma posterior). See growth_estimator.py's
-CI_METHODS registry.
-
-For each method/checkpoint, records:
-  - coverage: does the run's actual final tokens/duration fall inside the
-    CI published at that checkpoint?
-  - relative width: (ci_high - ci_low) / actual — how much the method
-    hedges, independent of whether it's right.
-
-A method that's simultaneously narrow (low relative width) and covers
-consistently (high coverage) is strictly better than the heuristic; a
-narrower-but-under-covering method has actually just gotten lucky.
-
-Usage:
-    python3 tools/cost_ablation/compare_ci_methods.py <logs...> [--out-dir DIR]
-"""
 from __future__ import annotations
 
 import argparse
 import json
+from pathlib import Path
 import statistics
 import sys
-from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from loguru import logger
 from replay_from_log import CI_METHODS_TO_COMPARE, replay_log  # noqa: E402
 
-from loguru import logger
-
 CHECKPOINT_FRACS = [0.10, 0.25, 0.50, 1.0]
-# Stalled on stall_watchdog at attempt 41/100 in the original run (see the
-# 2026-07-31 cost-model report) — the model predicts a full 100-attempt run
-# that never happens, which isn't a CI-method error. Same exclusion the
-# report itself applies to aggregate error stats.
+# Exclude a watchdog-terminated run whose actual horizon differs from the model.
 EXCLUDE_FROM_AGGREGATE = {"toy_kadane_withagent_postfix"}
 
 
@@ -65,13 +37,22 @@ def evaluate_log(path: Path) -> dict | None:
             dur_lo, dur_hi = ckpt[key]["duration_ci"]
             row[key] = dict(
                 tok_covered=tok_lo <= actual_tokens <= tok_hi,
-                tok_rel_width=(tok_hi - tok_lo) / actual_tokens if actual_tokens else float("nan"),
+                tok_rel_width=(tok_hi - tok_lo) / actual_tokens
+                if actual_tokens
+                else float("nan"),
                 dur_covered=dur_lo <= actual_duration <= dur_hi,
-                dur_rel_width=(dur_hi - dur_lo) / actual_duration if actual_duration else float("nan"),
+                dur_rel_width=(dur_hi - dur_lo) / actual_duration
+                if actual_duration
+                else float("nan"),
             )
         rows.append(row)
-    return dict(path=str(path), name=path.stem, checkpoints=rows,
-                actual_tokens=actual_tokens, actual_duration=actual_duration)
+    return dict(
+        path=str(path),
+        name=path.stem,
+        checkpoints=rows,
+        actual_tokens=actual_tokens,
+        actual_duration=actual_duration,
+    )
 
 
 def aggregate(per_log: list[dict]) -> dict:
@@ -83,7 +64,9 @@ def aggregate(per_log: list[dict]) -> dict:
         out[frac] = {}
         for method in CI_METHODS_TO_COMPARE:
             key = _method_key(method)
-            vals = [r["checkpoints"][CHECKPOINT_FRACS.index(frac)][key] for r in included]
+            vals = [
+                r["checkpoints"][CHECKPOINT_FRACS.index(frac)][key] for r in included
+            ]
             out[frac][key] = dict(
                 tok_coverage=statistics.mean(v["tok_covered"] for v in vals),
                 tok_median_width=statistics.median(v["tok_rel_width"] for v in vals),
@@ -94,7 +77,10 @@ def aggregate(per_log: list[dict]) -> dict:
 
 
 METHOD_COLOR = {
-    "heuristic": "#8b96a3", "bootstrap": "#2a6fb0", "montecarlo": "#c9a227", "bayesian": "#8b3fa8",
+    "heuristic": "#8b96a3",
+    "bootstrap": "#2a6fb0",
+    "montecarlo": "#c9a227",
+    "bayesian": "#8b3fa8",
 }
 
 
@@ -106,6 +92,7 @@ def build_comparison_png(agg: dict, out: Path) -> None:
     just means it got lucky on 8 runs.
     """
     import matplotlib
+
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     import numpy as np
@@ -128,7 +115,13 @@ def build_comparison_png(agg: dict, out: Path) -> None:
             vals = [agg[frac][key][field] for frac in fracs]
             ax.bar(x + i * bw, vals, width=bw, label=key, color=METHOD_COLOR[key])
         if is_coverage:
-            ax.axhline(0.9, color="#333", linestyle="--", linewidth=1, label="90% target (alpha=0.1)")
+            ax.axhline(
+                0.9,
+                color="#333",
+                linestyle="--",
+                linewidth=1,
+                label="90% target (alpha=0.1)",
+            )
             ax.set_ylim(0, 1.05)
         ax.set_xticks(x + bw * (len(method_keys) - 1) / 2)
         ax.set_xticklabels([f"{f:.0%}" for f in fracs])
@@ -136,15 +129,19 @@ def build_comparison_png(agg: dict, out: Path) -> None:
         ax.set_title(title, fontsize=11, fontweight="bold")
         ax.grid(alpha=0.3, axis="y")
     axes[0, 0].legend(fontsize=8, loc="lower right")
-    fig.suptitle("CI-construction method comparison: heuristic vs. bootstrap / Monte Carlo / Bayesian\n"
-                 "(replayed on the 9 collected logs, final-checkpoint columns collapse to a point — see README)",
-                 fontsize=12)
+    fig.suptitle(
+        "CI-construction method comparison: heuristic vs. bootstrap / Monte Carlo / Bayesian\n"
+        "(replayed on the 9 collected logs, final-checkpoint columns collapse to a point — see README)",
+        fontsize=12,
+    )
     fig.tight_layout(rect=[0, 0, 1, 0.93])
     fig.savefig(out, dpi=160)
     plt.close(fig)
 
 
-def build_dashboard_html(agg: dict, per_log: list[dict], png_name: str, out: Path) -> None:
+def build_dashboard_html(
+    agg: dict, per_log: list[dict], png_name: str, out: Path
+) -> None:
     """Self-contained HTML page: the comparison figure plus the raw
     coverage/width table, so the result can be opened in a browser without
     re-running anything."""
@@ -163,7 +160,8 @@ def build_dashboard_html(agg: dict, per_log: list[dict], png_name: str, out: Pat
         f"{' (excluded from aggregate — stalled early)' if r['name'] in EXCLUDE_FROM_AGGREGATE else ''}</li>"
         for r in per_log
     )
-    out.write_text(f"""<!doctype html><html><head><meta charset="utf-8">
+    out.write_text(
+        f"""<!doctype html><html><head><meta charset="utf-8">
 <title>CI method comparison — cost model</title>
 <style>
 body {{ font-family: -apple-system, sans-serif; max-width: 980px; margin: 2rem auto; padding: 0 1rem; color: #1a1a1a; }}
@@ -183,32 +181,44 @@ tokens/duration fell inside each method's published interval.</p>
 <h2>Aggregate (median across {len(per_log) - len(EXCLUDE_FROM_AGGREGATE)} runs)</h2>
 <table><tr><th>progress</th><th>method</th><th>token coverage</th><th>token width</th>
 <th>duration coverage</th><th>duration width</th></tr>
-{''.join(rows_html)}</table>
+{"".join(rows_html)}</table>
 <h2>Logs replayed</h2>
 <ul>{logs_html}</ul>
 <p><em>Note: at the 100% checkpoint there's no tail left to be uncertain about, so
 all three probabilistic methods fall back to the heuristic width for tokens, and
 the duration CI collapses to a single point (width 0) regardless of method — that
 column measures whether the point estimate is exactly exact, not CI quality.</em></p>
-</body></html>""", encoding="utf-8")
+</body></html>""",
+        encoding="utf-8",
+    )
 
 
 def print_table(agg: dict) -> None:
-    print(f"\n{'frac':>5s} {'method':>10s} {'tok_cov':>8s} {'tok_width':>10s} "
-          f"{'dur_cov':>8s} {'dur_width':>10s}")
+    print(
+        f"\n{'frac':>5s} {'method':>10s} {'tok_cov':>8s} {'tok_width':>10s} "
+        f"{'dur_cov':>8s} {'dur_width':>10s}"
+    )
     for frac in CHECKPOINT_FRACS:
         for method in CI_METHODS_TO_COMPARE:
             key = _method_key(method)
             m = agg[frac][key]
-            print(f"{frac:5.2f} {key:>10s} {m['tok_coverage']:8.0%} {m['tok_median_width']:10.2f} "
-                  f"{m['dur_coverage']:8.0%} {m['dur_median_width']:10.2f}")
+            print(
+                f"{frac:5.2f} {key:>10s} {m['tok_coverage']:8.0%} {m['tok_median_width']:10.2f} "
+                f"{m['dur_coverage']:8.0%} {m['dur_median_width']:10.2f}"
+            )
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("logs", nargs="+", type=Path, help="run.py log file(s) to replay")
-    ap.add_argument("--out-dir", type=Path, default=None,
-                     help="if set, write comparison.json + ci_methods_dashboard.html here")
+    ap.add_argument(
+        "--out-dir",
+        type=Path,
+        default=None,
+        help="if set, write comparison.json + ci_methods_dashboard.html here",
+    )
     args = ap.parse_args()
 
     logger.remove()  # replay re-logs every event at INFO; noisy for a batch tool
@@ -220,8 +230,10 @@ def main() -> None:
             print(f"{log_path.name}: skipped (no events / no ground truth)")
             continue
         per_log.append(result)
-        print(f"{log_path.name}: {len(result['checkpoints'])} checkpoints, "
-              f"actual_tokens={result['actual_tokens']:,}, actual_duration={result['actual_duration']:.0f}s")
+        print(
+            f"{log_path.name}: {len(result['checkpoints'])} checkpoints, "
+            f"actual_tokens={result['actual_tokens']:,}, actual_duration={result['actual_duration']:.0f}s"
+        )
 
     if not per_log:
         print("no logs produced usable checkpoints")
@@ -233,11 +245,19 @@ def main() -> None:
     if args.out_dir:
         args.out_dir.mkdir(parents=True, exist_ok=True)
         (args.out_dir / "comparison.json").write_text(
-            json.dumps({"per_log": per_log, "aggregate": {str(k): v for k, v in agg.items()}}, indent=2),
-            encoding="utf-8")
+            json.dumps(
+                {"per_log": per_log, "aggregate": {str(k): v for k, v in agg.items()}},
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
         build_comparison_png(agg, args.out_dir / "ci_method_comparison.png")
-        build_dashboard_html(agg, per_log, "ci_method_comparison.png", args.out_dir / "dashboard.html")
-        print(f"\nreport written to {args.out_dir} (comparison.json, ci_method_comparison.png, dashboard.html)")
+        build_dashboard_html(
+            agg, per_log, "ci_method_comparison.png", args.out_dir / "dashboard.html"
+        )
+        print(
+            f"\nreport written to {args.out_dir} (comparison.json, ci_method_comparison.png, dashboard.html)"
+        )
 
 
 if __name__ == "__main__":

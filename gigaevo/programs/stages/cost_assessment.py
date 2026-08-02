@@ -1,12 +1,7 @@
 from __future__ import annotations
 
-import json
-from dataclasses import dataclass, field
-from typing import Any, Optional
-
 import loguru
-from pydantic import BaseModel, TypeAdapter
-from pydantic import Field
+from pydantic import BaseModel, Field, TypeAdapter
 
 from gigaevo.llm.agents.base import LangGraphAgent
 from gigaevo.programs.core_types import VoidInput
@@ -56,7 +51,7 @@ class CostAssessmentStage(Stage):
         self._seed_program = seed_program
         self._system_prompt = system_prompt
         self._llm = llm
-        self._cached: Optional[DictContainer] = None
+        self._cached: DictContainer | None = None
 
     async def compute(self, program: Program) -> DictContainer:
         if self._cached is not None:
@@ -89,9 +84,17 @@ class CostAssessmentStage(Stage):
             if start >= 0 and end > start:
                 obj = PARSER.validate_json(raw[start:end])
                 # Override defaults from LLM response
-                if obj.complexity == 5 and obj.growth_rate == "medium" and obj.bottleneck_hint == "unknown":
+                if (
+                    obj.complexity == 5
+                    and obj.growth_rate == "medium"
+                    and obj.bottleneck_hint == "unknown"
+                ):
                     # Likely not a real response, use defaults
-                    data = {"complexity": "5", "growth_rate": "medium", "bottleneck_hint": "parse_error"}
+                    data = {
+                        "complexity": "5",
+                        "growth_rate": "medium",
+                        "bottleneck_hint": "parse_error",
+                    }
                 else:
                     data = {
                         "complexity": str(obj.complexity),
@@ -99,7 +102,11 @@ class CostAssessmentStage(Stage):
                         "bottleneck_hint": obj.bottleneck_hint,
                     }
             else:
-                data = {"complexity": "5", "growth_rate": "medium", "bottleneck_hint": "parse_error"}
+                data = {
+                    "complexity": "5",
+                    "growth_rate": "medium",
+                    "bottleneck_hint": "parse_error",
+                }
         except Exception:
             loguru.logger.opt(exception=True).debug(
                 "[{}] cost assessment failed", self.stage_name

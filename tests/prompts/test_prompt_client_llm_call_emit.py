@@ -1,10 +1,4 @@
-"""Tests for cost/time tracking and LLM_CALL emission in the prompt-eval LLMClient.
-
-Mirrors `tests/problems/test_chain_client_llm_call_emit.py` for
-`problems/prompts/client.py::LLMClient` — the analogous client used by
-prompt-coevolution validators, which previously left the same kind of gap
-(no `[LLM_CALL]` trace for validator LLM calls).
-"""
+"""Test cost telemetry emitted by the prompt-evaluation LLM client."""
 
 from __future__ import annotations
 

@@ -109,6 +109,8 @@ class TaskBuilderAgent(LangGraphAgent):
                 retry_note = str(exc)
                 logger.warning(
                     "[TaskBuilderAgent] attempt {}/{} failed validation: {}",
-                    attempt + 1, max_attempts, exc,
+                    attempt + 1,
+                    max_attempts,
+                    exc,
                 )
         raise last_error

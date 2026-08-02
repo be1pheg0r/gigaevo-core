@@ -59,7 +59,8 @@ def test_estimate_by_stage_sums_pooled_service_time_before_dividing_once() -> No
     tokens_by_stage = {"A": [100.0, 100.0], "B": [200.0, 200.0]}
     latency_by_stage = {"A": [1000.0, 1000.0], "B": [1000.0, 1000.0]}
     est = estimate_by_stage(
-        tokens_by_stage, latency_by_stage,
+        tokens_by_stage,
+        latency_by_stage,
         total_units_by_stage={"A": 5, "B": 5},
         max_in_flight=2,
     )
@@ -76,7 +77,8 @@ def test_estimate_by_stage_beats_pooled_estimate_on_alternating_stages() -> None
     tokens_a = [100.0] * 5  # stage A: flat at 100
     tokens_b = [300.0] * 5  # stage B: flat at 300
     est = estimate_by_stage(
-        {"A": tokens_a, "B": tokens_b}, {"A": [0.0] * 5, "B": [0.0] * 5},
+        {"A": tokens_a, "B": tokens_b},
+        {"A": [0.0] * 5, "B": [0.0] * 5},
         total_units_by_stage={"A": 10, "B": 10},
         max_in_flight=1,
     )
@@ -130,7 +132,9 @@ def test_bounded_integral_caps_runaway_extrapolation() -> None:
     # ceiling; integrating that far past the observed range must not blow
     # up to orders of magnitude beyond anything plausible.
     values = [1.0, 500.0, 520.0, 540.0, 560.0]
-    est = estimate(values, [0.0] * 5, total_calls=200, max_in_flight=1, law_cls=PowerLaw)
+    est = estimate(
+        values, [0.0] * 5, total_calls=200, max_in_flight=1, law_cls=PowerLaw
+    )
     # Flat (no-growth) extrapolation would be ~mean(values)*200 ≈ 84,400.
     assert est.predicted_total_tokens < 84_400 * 10
 
@@ -151,8 +155,10 @@ def test_estimate_duration_by_stage_uses_tokens_out_not_call_index() -> None:
     latency_by_stage = {"A": [1100.0, 2100.0, 2100.0, 1100.0]}  # ttft=100, tpot=10
     # 8 total units, 4 observed -> only the 4 remaining are predicted.
     duration_s, ci = estimate_duration_by_stage(
-        tokens_out_by_stage, latency_by_stage,
-        total_units_by_stage={"A": 8}, max_in_flight=1,
+        tokens_out_by_stage,
+        latency_by_stage,
+        total_units_by_stage={"A": 8},
+        max_in_flight=1,
     )
     # mean tokens_out=150 -> per-call latency ~= 100+10*150=1600ms; *4 remaining = 6.4s
     assert duration_s == pytest.approx(6.4, rel=0.05)
@@ -163,9 +169,12 @@ def test_duration_anchors_on_elapsed_and_divides_by_achieved_concurrency() -> No
     tokens_out_by_stage = {"A": [100.0, 100.0]}
     latency_by_stage = {"A": [1100.0, 1100.0]}  # ttft=0, tpot=11 -> 1100ms/unit
     duration_s, _ = estimate_duration_by_stage(
-        tokens_out_by_stage, latency_by_stage,
-        total_units_by_stage={"A": 6}, max_in_flight=8,
-        elapsed_s=500.0, concurrency=2.0,
+        tokens_out_by_stage,
+        latency_by_stage,
+        total_units_by_stage={"A": 6},
+        max_in_flight=8,
+        elapsed_s=500.0,
+        concurrency=2.0,
     )
     # 4 remaining units * 1100ms = 4.4s of service, at concurrency 2 -> 2.2s
     assert duration_s == pytest.approx(502.2, rel=0.02)
@@ -173,10 +182,11 @@ def test_duration_anchors_on_elapsed_and_divides_by_achieved_concurrency() -> No
 
 def test_duration_never_goes_negative_on_a_noisy_ttft_fit() -> None:
     # Latency FALLS as tokens_out rises — OLS hands back a negative slope,
-    # which used to produce a negative predicted duration.
     duration_s, _ = estimate_duration_by_stage(
-        {"A": [100.0, 200.0, 300.0]}, {"A": [3000.0, 2000.0, 1000.0]},
-        total_units_by_stage={"A": 20}, max_in_flight=4,
+        {"A": [100.0, 200.0, 300.0]},
+        {"A": [3000.0, 2000.0, 1000.0]},
+        total_units_by_stage={"A": 20},
+        max_in_flight=4,
     )
     assert duration_s >= 0.0
 
@@ -209,7 +219,9 @@ def test_tail_integral_never_undercuts_what_was_already_observed() -> None:
     assert tail > sum(values) * 0.3
 
 
-@pytest.mark.parametrize("ci_fn", [tail_ci_bootstrap, tail_ci_montecarlo, tail_ci_bayesian])
+@pytest.mark.parametrize(
+    "ci_fn", [tail_ci_bootstrap, tail_ci_montecarlo, tail_ci_bayesian]
+)
 def test_probabilistic_ci_methods_anchor_above_observed_sum(ci_fn) -> None:
     # The true total can only grow from here, so the CI floor must never
     # drop below what's already been observed (same invariant as tail_integral).
@@ -218,7 +230,9 @@ def test_probabilistic_ci_methods_anchor_above_observed_sum(ci_fn) -> None:
     assert sum(values) <= lo <= hi
 
 
-@pytest.mark.parametrize("ci_fn", [tail_ci_bootstrap, tail_ci_montecarlo, tail_ci_bayesian])
+@pytest.mark.parametrize(
+    "ci_fn", [tail_ci_bootstrap, tail_ci_montecarlo, tail_ci_bayesian]
+)
 def test_probabilistic_ci_methods_widen_on_noisier_residuals(ci_fn) -> None:
     calm = [100.0, 102.0, 99.0, 101.0, 100.0, 103.0]
     noisy = [40.0, 180.0, 60.0, 160.0, 50.0, 170.0]
@@ -227,7 +241,9 @@ def test_probabilistic_ci_methods_widen_on_noisier_residuals(ci_fn) -> None:
     assert (hi_n - lo_n) > (hi_c - lo_c)
 
 
-@pytest.mark.parametrize("ci_fn", [tail_ci_bootstrap, tail_ci_montecarlo, tail_ci_bayesian])
+@pytest.mark.parametrize(
+    "ci_fn", [tail_ci_bootstrap, tail_ci_montecarlo, tail_ci_bayesian]
+)
 def test_probabilistic_ci_methods_collapse_with_too_few_points(ci_fn) -> None:
     assert ci_fn(LinearLaw, [100.0], 12) == (100.0, 100.0)
     assert ci_fn(LinearLaw, [], 12) == (0.0, 0.0)

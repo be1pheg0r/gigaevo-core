@@ -24,16 +24,19 @@ It writes into ``<out-dir>/report/``:
 Run with --selftest (no manifest needed) to sanity-check the parser against
 an in-memory synthetic log.
 """
+
 from __future__ import annotations
 
 import argparse
 import json
-import re
 from pathlib import Path
+import re
 
 CMJ_RE = re.compile(r"\[CostMonitorHookJSON\] (\{.*\})")
 DUR_RE = re.compile(r"Duration: ([\d.]+)s")
-TOK_RE = re.compile(r"\[TokenTracker:(\w+)\] ([\w.\-]+): \d+ ctx \+ \d+ gen \(\d+ reasoning\) = \d+ \(cumulative: (\d+)\)")
+TOK_RE = re.compile(
+    r"\[TokenTracker:(\w+)\] ([\w.\-]+): \d+ ctx \+ \d+ gen \(\d+ reasoning\) = \d+ \(cumulative: (\d+)\)"
+)
 
 COND_LABEL = {"noagent": "no agent", "withagent": "with agent"}
 
@@ -72,10 +75,15 @@ def summarize(repo_root: Path, entry: dict) -> dict | None:
     last = series[-1]
     pred_tokens, pred_duration = last["predicted_tokens"], last["predicted_duration_s"]
     return dict(
-        task=entry["task"], key=entry["key"], condition=entry["condition"],
-        n_points=len(series), series=series,
-        pred_tokens=pred_tokens, pred_duration=pred_duration,
-        actual_tokens=actual_tokens, actual_duration=duration,
+        task=entry["task"],
+        key=entry["key"],
+        condition=entry["condition"],
+        n_points=len(series),
+        series=series,
+        pred_tokens=pred_tokens,
+        pred_duration=pred_duration,
+        actual_tokens=actual_tokens,
+        actual_duration=duration,
         tok_err_pct=(pred_tokens - actual_tokens) / actual_tokens * 100,
         dur_err_pct=(pred_duration - duration) / duration * 100,
     )
@@ -123,11 +131,23 @@ def build_table_tex(rows_by_task: dict[str, dict[str, dict]]) -> str:
 
 def build_table_png(rows_by_task: dict[str, dict[str, dict]], out_path: Path) -> None:
     import matplotlib
+
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    table_rows = [["Task", "Condition", "Pred tok", "Act tok", "Tok err %",
-                   "Pred dur (s)", "Act dur (s)", "Dur err %", "N pts"]]
+    table_rows = [
+        [
+            "Task",
+            "Condition",
+            "Pred tok",
+            "Act tok",
+            "Tok err %",
+            "Pred dur (s)",
+            "Act dur (s)",
+            "Dur err %",
+            "N pts",
+        ]
+    ]
     row_colors = [None]
     for key, conds in rows_by_task.items():
         first = True
@@ -135,12 +155,19 @@ def build_table_png(rows_by_task: dict[str, dict[str, dict]], out_path: Path) ->
             s = conds.get(cond)
             if not s:
                 continue
-            table_rows.append([
-                key if first else "", COND_LABEL[cond],
-                f"{s['pred_tokens']:,}", f"{s['actual_tokens']:,}", f"{s['tok_err_pct']:+.1f}",
-                f"{s['pred_duration']:.0f}", f"{s['actual_duration']:.0f}", f"{s['dur_err_pct']:+.1f}",
-                str(s["n_points"]),
-            ])
+            table_rows.append(
+                [
+                    key if first else "",
+                    COND_LABEL[cond],
+                    f"{s['pred_tokens']:,}",
+                    f"{s['actual_tokens']:,}",
+                    f"{s['tok_err_pct']:+.1f}",
+                    f"{s['pred_duration']:.0f}",
+                    f"{s['actual_duration']:.0f}",
+                    f"{s['dur_err_pct']:+.1f}",
+                    str(s["n_points"]),
+                ]
+            )
             row_colors.append("#e8f7ee" if cond == "withagent" else None)
             first = False
 
@@ -164,8 +191,11 @@ def build_table_png(rows_by_task: dict[str, dict[str, dict]], out_path: Path) ->
     plt.close(fig)
 
 
-def build_error_decay_png(rows_by_task: dict[str, dict[str, dict]], out_path: Path) -> None:
+def build_error_decay_png(
+    rows_by_task: dict[str, dict[str, dict]], out_path: Path
+) -> None:
     import matplotlib
+
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     import numpy as np
@@ -183,8 +213,12 @@ def build_error_decay_png(rows_by_task: dict[str, dict[str, dict]], out_path: Pa
             if not s:
                 continue
             xs = np.arange(len(s["series"])) / max(len(s["series"]) - 1, 1)
-            errs = [abs(p["predicted_duration_s"] - s["actual_duration"]) / s["actual_duration"] * 100
-                    for p in s["series"]]
+            errs = [
+                abs(p["predicted_duration_s"] - s["actual_duration"])
+                / s["actual_duration"]
+                * 100
+                for p in s["series"]
+            ]
             ax.plot(xs, errs, label=COND_LABEL[cond], color=colors[cond], linewidth=1.8)
         ax.set_title(key, fontsize=11, fontweight="bold")
         ax.set_xlabel("run progress (0->1)")
@@ -212,11 +246,15 @@ def err_at(s: dict, p: float, field: str) -> float:
     """
     series = s["series"]
     i = min(len(series) - 1, max(0, int(round(p * len(series))) - 1))
-    actual = s["actual_duration"] if field == "predicted_duration_s" else s["actual_tokens"]
+    actual = (
+        s["actual_duration"] if field == "predicted_duration_s" else s["actual_tokens"]
+    )
     return (series[i][field] - actual) / actual * 100
 
 
-def build_progress_grid(rows_by_task: dict[str, dict[str, dict]], out_dir: Path) -> None:
+def build_progress_grid(
+    rows_by_task: dict[str, dict[str, dict]], out_dir: Path
+) -> None:
     """Error-vs-progress grid: the headline comparison, table + figure.
 
     CSV holds every (task, condition, progress) cell; the figure shows the
@@ -226,6 +264,7 @@ def build_progress_grid(rows_by_task: dict[str, dict[str, dict]], out_dir: Path)
     import csv
 
     import matplotlib
+
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     import numpy as np
@@ -234,46 +273,73 @@ def build_progress_grid(rows_by_task: dict[str, dict[str, dict]], out_dir: Path)
 
     with open(out_dir / "progress_grid.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(["task", "condition", "progress", "metric", "signed_err_pct", "abs_err_pct"])
+        w.writerow(
+            ["task", "condition", "progress", "metric", "signed_err_pct", "abs_err_pct"]
+        )
         for key, conds in rows_by_task.items():
             for cond, s in conds.items():
                 for field, label in fields:
                     for p in GRID:
                         e = err_at(s, p, field)
-                        w.writerow([key, cond, f"{p:.2f}", label, f"{e:.2f}", f"{abs(e):.2f}"])
+                        w.writerow(
+                            [key, cond, f"{p:.2f}", label, f"{e:.2f}", f"{abs(e):.2f}"]
+                        )
 
     fig, axes = plt.subplots(1, 2, figsize=(13, 5))
     colors = {"noagent": "#8b96a3", "withagent": "#2a9d5c"}
     for ax, (field, label) in zip(axes, fields):
         for cond in ("noagent", "withagent"):
-            series = [[abs(err_at(s, p, field)) for p in GRID]
-                      for conds in rows_by_task.values() if (s := conds.get(cond))]
+            series = [
+                [abs(err_at(s, p, field)) for p in GRID]
+                for conds in rows_by_task.values()
+                if (s := conds.get(cond))
+            ]
             if not series:
                 continue
             arr = np.array(series)
             med = np.median(arr, axis=0)
-            ax.plot([p * 100 for p in GRID], med, color=colors[cond], linewidth=2.2,
-                    marker="o", markersize=4, label=f"{COND_LABEL[cond]} (n={len(series)})",
-                    linestyle="-" if cond == "withagent" else (0, (4, 2)))
-            ax.fill_between([p * 100 for p in GRID],
-                            np.percentile(arr, 25, axis=0), np.percentile(arr, 75, axis=0),
-                            color=colors[cond], alpha=0.13)
+            ax.plot(
+                [p * 100 for p in GRID],
+                med,
+                color=colors[cond],
+                linewidth=2.2,
+                marker="o",
+                markersize=4,
+                label=f"{COND_LABEL[cond]} (n={len(series)})",
+                linestyle="-" if cond == "withagent" else (0, (4, 2)),
+            )
+            ax.fill_between(
+                [p * 100 for p in GRID],
+                np.percentile(arr, 25, axis=0),
+                np.percentile(arr, 75, axis=0),
+                color=colors[cond],
+                alpha=0.13,
+            )
         ax.axhline(10, color="#c0c0c0", linestyle=":", linewidth=1)
         ax.set_xlabel("run progress, %")
         ax.set_ylabel(f"|{label} prediction error|, %")
-        ax.set_title(f"{label.capitalize()} error vs progress (median, IQR band)",
-                     fontsize=11, fontweight="bold")
+        ax.set_title(
+            f"{label.capitalize()} error vs progress (median, IQR band)",
+            fontsize=11,
+            fontweight="bold",
+        )
         ax.grid(alpha=0.3)
         ax.legend(fontsize=9)
-    fig.suptitle("Automatic estimator vs estimator + CostMonitorAgent, alphaevolve tasks", fontsize=13)
+    fig.suptitle(
+        "Automatic estimator vs estimator + CostMonitorAgent, alphaevolve tasks",
+        fontsize=13,
+    )
     fig.tight_layout(rect=[0, 0, 1, 0.95])
     fig.savefig(out_dir / "error_vs_progress.png", dpi=160)
     plt.close(fig)
 
 
-def build_grid_table_png(rows_by_task: dict[str, dict[str, dict]], out_dir: Path) -> None:
+def build_grid_table_png(
+    rows_by_task: dict[str, dict[str, dict]], out_dir: Path
+) -> None:
     """Median |error| per checkpoint as a compact two-row-per-metric table."""
     import matplotlib
+
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     import numpy as np
@@ -281,12 +347,18 @@ def build_grid_table_png(rows_by_task: dict[str, dict[str, dict]], out_dir: Path
     checkpoints = [0.05, 0.1, 0.15, 0.25, 0.5, 0.75, 1.0]
     header = ["Metric", "Condition"] + [f"{int(p * 100)}%" for p in checkpoints]
     body, colors = [header], [None]
-    for field, label in [("predicted_duration_s", "duration"), ("predicted_tokens", "tokens")]:
+    for field, label in [
+        ("predicted_duration_s", "duration"),
+        ("predicted_tokens", "tokens"),
+    ]:
         for cond in ("noagent", "withagent"):
             vals = []
             for p in checkpoints:
-                col = [abs(err_at(s, p, field))
-                       for conds in rows_by_task.values() if (s := conds.get(cond))]
+                col = [
+                    abs(err_at(s, p, field))
+                    for conds in rows_by_task.values()
+                    if (s := conds.get(cond))
+                ]
                 vals.append(f"{np.median(col):.1f}" if col else "-")
             body.append([label if cond == "noagent" else "", COND_LABEL[cond]] + vals)
             colors.append("#e3f5ea" if cond == "withagent" else None)
@@ -305,7 +377,9 @@ def build_grid_table_png(rows_by_task: dict[str, dict[str, dict]], out_dir: Path
                 cell.set_facecolor("#dddddd")
             elif color:
                 cell.set_facecolor(color)
-    ax.set_title("Median |prediction error| %, by run progress", fontsize=12, fontweight="bold")
+    ax.set_title(
+        "Median |prediction error| %, by run progress", fontsize=12, fontweight="bold"
+    )
     fig.tight_layout()
     fig.savefig(out_dir / "progress_grid_table.png", dpi=180, bbox_inches="tight")
     plt.close(fig)
@@ -322,7 +396,9 @@ def run(manifest_path: Path) -> Path:
     for entry in manifest:
         s = summarize(repo_root, entry)
         if not s:
-            print(f"skipping {entry['key']}[{entry['condition']}]: no usable data (crashed / no CostMonitorHookJSON)")
+            print(
+                f"skipping {entry['key']}[{entry['condition']}]: no usable data (crashed / no CostMonitorHookJSON)"
+            )
             continue
         rows_by_task.setdefault(entry["key"], {})[entry["condition"]] = s
 
@@ -345,17 +421,19 @@ def _selftest() -> None:
     import tempfile
 
     fake_log = (
-        '2026-01-01 00:00:00.000 | INFO | x | [CostMonitorHookJSON] '
+        "2026-01-01 00:00:00.000 | INFO | x | [CostMonitorHookJSON] "
         '{"mutant": 0, "predicted_tokens": 1000, "token_ci_low": 500, "token_ci_high": 1500, '
         '"predicted_duration_s": 10.0, "ci_low_s": 5.0, "ci_high_s": 15.0}\n'
-        '2026-01-01 00:00:01.000 | INFO | x | [CostMonitorHookJSON] '
+        "2026-01-01 00:00:01.000 | INFO | x | [CostMonitorHookJSON] "
         '{"mutant": 1, "predicted_tokens": 900, "token_ci_low": 600, "token_ci_high": 1200, '
         '"predicted_duration_s": 9.5, "ci_low_s": 6.0, "ci_high_s": 13.0}\n'
-        '2026-01-01 00:00:02.000 | DEBUG | x | [TokenTracker:default] qwen: 100 ctx + 50 gen (0 reasoning) '
-        '= 150 (cumulative: 950)\n'
-        '2026-01-01 00:00:03.000 | INFO | __main__:run_experiment:115 | Duration: 42.0s (0.01h)\n'
+        "2026-01-01 00:00:02.000 | DEBUG | x | [TokenTracker:default] qwen: 100 ctx + 50 gen (0 reasoning) "
+        "= 150 (cumulative: 950)\n"
+        "2026-01-01 00:00:03.000 | INFO | __main__:run_experiment:115 | Duration: 42.0s (0.01h)\n"
     )
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".log", delete=False, encoding="utf-8") as f:
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".log", delete=False, encoding="utf-8"
+    ) as f:
         f.write(fake_log)
         tmp_path = Path(f.name)
     try:
@@ -364,8 +442,10 @@ def _selftest() -> None:
         assert series[-1]["predicted_tokens"] == 900
         assert duration == 42.0
         assert actual_tokens == 950
-        s = summarize(tmp_path.parent, {"task": "t", "key": "t", "condition": "noagent",
-                                          "log": tmp_path.name})
+        s = summarize(
+            tmp_path.parent,
+            {"task": "t", "key": "t", "condition": "noagent", "log": tmp_path.name},
+        )
         assert s is not None
         assert s["tok_err_pct"] == (900 - 950) / 950 * 100
 
@@ -382,9 +462,17 @@ def _selftest() -> None:
 
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--manifest", type=Path, help="path to manifest.json written by run_ablation.py")
-    ap.add_argument("--selftest", action="store_true", help="run the built-in parser self-check and exit")
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument(
+        "--manifest", type=Path, help="path to manifest.json written by run_ablation.py"
+    )
+    ap.add_argument(
+        "--selftest",
+        action="store_true",
+        help="run the built-in parser self-check and exit",
+    )
     args = ap.parse_args()
 
     if args.selftest:

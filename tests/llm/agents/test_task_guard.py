@@ -65,7 +65,9 @@ class TestKeywordBackstop:
         assert hit.id == "malicious_cyber_activity"
 
     def test_case_insensitive(self):
-        hit = _keyword_backstop_hit("Design a BIOWEAPON delivery mechanism", _forbidden())
+        hit = _keyword_backstop_hit(
+            "Design a BIOWEAPON delivery mechanism", _forbidden()
+        )
         assert hit is not None
         assert hit.id == "weapons_and_cbrn"
 
@@ -132,7 +134,9 @@ class TestTaskGuardAgentParseResponse:
             "metadata": {},
         }
         result = agent.parse_response(state)
-        assert result["classification"].prohibited_category == "malicious_cyber_activity"
+        assert (
+            result["classification"].prohibited_category == "malicious_cyber_activity"
+        )
 
     def test_wrong_response_type_raises(self):
         agent = self._make_agent()
