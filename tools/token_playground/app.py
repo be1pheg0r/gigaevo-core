@@ -201,7 +201,7 @@ def _load_hook(probe: ProbeRun) -> Any | None:
     if not probe.log.exists() or probe.log.stat().st_size == 0:
         return None
     try:
-        hook = hook_from_log(probe.log)
+        hook = hook_from_log(probe.log, infer_attempts_from_llm=True)
     except (OSError, ValueError, json.JSONDecodeError):
         return None
     if hook is None or not hook._tokens_by_stage:  # noqa: SLF001 - projection seam
