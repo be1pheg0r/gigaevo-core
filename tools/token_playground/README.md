@@ -12,7 +12,7 @@ Safety limits are intentionally constants in `app.py`:
 - one active probe globally;
 - 10 real mutation attempts per probe;
 - 15 minute hard timeout;
-- one new probe per IP per 10 minutes;
+- one new probe per IP per 30 seconds;
 - 12 new probes per process per 24 hours;
 - 4 KiB request-body limit;
 - 180 API requests per IP per minute and at most 500 live result handles;

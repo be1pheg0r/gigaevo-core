@@ -46,7 +46,7 @@ MAX_TARGET_ATTEMPTS = 1_000
 MAX_BUDGET_TOKENS = 20_000_000
 MAX_ACTIVE_PROBES = 1
 MAX_DAILY_PROBES = 12
-IP_COOLDOWN_S = 10 * 60
+IP_COOLDOWN_S = 30
 MAX_REQUEST_BYTES = 4_096
 MAX_JOBS = 500
 JOB_TTL_S = 60 * 60
@@ -425,7 +425,7 @@ def selftest() -> None:
     assert post_paths == {"/api/estimate"}
     forbidden_segments = {"experiment", "experiments", "launch", "stop", "log", "logs"}
     assert not any(forbidden_segments.intersection(path.strip("/").split("/")) for path in public_paths)
-    assert PROBE_ATTEMPTS == 10 and MAX_ACTIVE_PROBES == 1
+    assert PROBE_ATTEMPTS == 10 and MAX_ACTIVE_PROBES == 1 and IP_COOLDOWN_S == 30
     assert TASK_CATALOG and all(_problem_exists(task) for task in TASK_CATALOG)
     alphaevolve_root = REPO / "problems" / "alphaevolve"
     discovered_tasks = {
